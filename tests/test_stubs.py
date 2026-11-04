@@ -16,7 +16,6 @@ SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 class StubTest(unittest.TestCase):
     """Each mode fails with its own 'not implemented' diagnostic."""
 
-    @unittest.expectedFailure
     def test_modes_not_implemented(self) -> None:
         for mode in ("pack", "unpack"):
             with self.subTest(mode=mode):

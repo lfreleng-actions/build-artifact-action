@@ -50,27 +50,46 @@ jobs:
         with:
           persist-credentials: false
 
-      # Perform setup prior to running test(s)
-      - name: "Testing setup step"
+      # The unit tests include tests/test_stubs.py, which asserts that
+      # pack.py and unpack.py exit 1 with their "not implemented"
+      # diagnostic, so the pack failure below is that one and not a
+      # missing or crashing script.
+      - name: "Run unit tests"
         shell: bash
         run: |
-          # Testing setup step
-          echo "Testing setup step"
-          echo "Testing setup step/summary output" >> "$GITHUB_STEP_SUMMARY"
+          # Run unit tests
+          python3 -m unittest discover -s tests
 
-      - name: "Running local action: ${{ github.repository }}"
+      # Until the pack mode is implemented, valid pack inputs pass
+      # validation and then fail in the Pack step. The artifact-name
+      # output comes from the validation step, so a non-empty value
+      # shows the failure came after validation, from the Pack step.
+      - name: "Running local action: ${{ github.repository }} [pack]"
         uses: $/
+        id: pack
+        continue-on-error: true
         with:
-          input: "test input 💬"
+          mode: "pack"
+          artifact-name: "test-artifact"
+          path: "."
 
-      - name: "Validated local action: ${{ github.repository }}"
+      - name: "Error if pack did not fail as not implemented"
         shell: bash
         env:
-          REPO: ${{ github.repository }}
+          OUTCOME: ${{ steps.pack.outcome }}
+          ARTIFACT_NAME: ${{ steps.pack.outputs.artifact-name }}
         run: |
-          # Local action validation
-          echo "Validated local action: $REPO"
-          echo "Validation step summary output" >> "$GITHUB_STEP_SUMMARY"
+          # Error if pack did not fail as not implemented
+          if [ "$OUTCOME" != "failure" ]; then
+            echo "Error: pack step did not fail ❌"
+            exit 1
+          fi
+          if [ "$ARTIFACT_NAME" != "test-artifact" ]; then
+            echo "Error: pack failed in validation, not as unimplemented ❌"
+            exit 1
+          fi
+          echo "Pack validated, then failed as not implemented ✅"
+          echo "Pack failed as not implemented ✅" >> "$GITHUB_STEP_SUMMARY"
 
       # yamllint disable-line rule:line-length
       - name: "Running local action: ${{ github.repository }} [Override Failure]"
@@ -78,13 +97,16 @@ jobs:
         id: failure
         continue-on-error: true
         with:
-          invalid_input: "Some garbage"
+          mode: "invalid"
+          artifact-name: "test-artifact"
 
       # Failure testing is also important
-      - name: "Error if step above did NOT fail"
-        if: steps.failure.outcome == 'success'
+      - name: "Error if step above did NOT fail validation"
+        if: >-
+          steps.failure.outcome == 'success' ||
+          steps.failure.outputs.artifact-name != ''
         shell: bash
         run: |
-          # Error if step above did NOT fail
-          echo "Error: previous test step did NOT fail ❌"
+          # Error if step above did NOT fail validation
+          echo "Error: previous test step did NOT fail validation ❌"
           exit 1
