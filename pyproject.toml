@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Not a distributable package: this file only tells ruff, mypy and
+# basedpyright which Python the scripts under scripts/ target.
+[project]
+name = "build-artifact-action"
+version = "0.0.0"
+description = "Pack and unpack a directory tree as a workflow artefact"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.mypy]
+strict = true
+
+[tool.basedpyright]
+pythonVersion = "3.10"
