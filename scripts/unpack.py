@@ -48,7 +48,13 @@ from scripts.manifest_schema import (
     path_problem,
 )
 from scripts.unpack_links import check_link_target, restore_link_targets
-from scripts.unpack_modes import as_restored, drop_owner_read, restore_modes
+from scripts.unpack_modes import (
+    as_restored,
+    drop_owner_read,
+    open_up,
+    restore_dir_modes,
+    restore_modes,
+)
 from scripts.validate import PATH_RULE, inside, path_grammar_ok, write_outputs
 
 TAR_NAME = "build-artifact.tar"
@@ -132,6 +138,7 @@ def remove_created(created: list[str]) -> list[str]:
     for path in reversed(created):
         try:
             if path == created[-1]:
+                open_up(path)
                 shutil.rmtree(path)
             else:
                 os.rmdir(path)
@@ -359,6 +366,7 @@ def unpack(env: Mapping[str, str], created: list[str]) -> dict[str, str]:
     restore_modes(final, files)
     count = verify_tree(as_restored(manifest), final)
     drop_owner_read(final, files)
+    restore_dir_modes(final, members)
     return {
         "destination": final,
         "artifact-name": manifest["artifact_name"],

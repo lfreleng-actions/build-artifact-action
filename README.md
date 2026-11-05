@@ -13,9 +13,6 @@
 Packs a directory tree into a workflow artefact in one job, and unpacks
 it in another.
 
-> **Note:** packing is not implemented yet; `pack` mode fails after
-> validating its inputs.
-
 ## build-artifact-action
 
 - **pack** uploads the files under `path` (or the listed `paths`) as
@@ -44,10 +41,11 @@ it creates itself. An existing `destination`, even an empty directory,
 or a symlink above it fails the step. Regular files keep their
 permission bits within `0777`: a tar member whose mode differs from the
 manifest fails the step, and `unpack` drops any setuid, setgid or
-sticky bit the manifest records. The extracted tree must match the
-manifest file for file; on any failure after extraction began the step
-removes `destination` before failing, so a later step never reads a
-partial tree. Nothing in the artefact runs.
+sticky bit the manifest records. Directories get their tar modes back
+within `0777` too, once `unpack` has checked the tree. The extracted
+tree must match the manifest file for file; on any failure after
+extraction began the step removes `destination` before failing, so a
+later step never reads a partial tree. Nothing in the artefact runs.
 
 With `artifact-id`, `actions/download-artifact` reports no trusted name
 for the artefact without a token, which `unpack` does not take. The
@@ -69,6 +67,11 @@ comment.
 
 ```yaml
 steps:
+  - name: "Checkout repository"
+    uses: actions/checkout@<full-commit-sha> # vX.Y.Z
+    with:
+      persist-credentials: false
+
   - name: "Pack build output"
     id: pack
     uses: lfreleng-actions/build-artifact-action@<full-commit-sha> # vX.Y.Z
@@ -79,6 +82,62 @@ steps:
 ```
 
 <!-- markdownlint-enable MD046 -->
+
+## Pack
+
+`pack` writes the selected entries under `path` to
+`build-artifact.tar`, writes the [manifest](#manifest) beside it, and
+uploads both files, and nothing else, as one artefact with
+`actions/upload-artifact`. The tar keeps file modes and stores
+symlinks as symlinks. Upload compression is off: the tar is the unit
+of transfer, and zipping it again costs time on large trees.
+
+- **Selection.** With `paths` empty, `pack` takes everything under
+  `path`. Otherwise it takes each listed file, and each listed
+  directory with everything below it. It never follows a symlink.
+  Where `RUNNER_TEMP` lies under `path`, it skips the whole of
+  `RUNNER_TEMP`: the runner's output and step summary files and the
+  `build-artifact-*` directories `pack` writes the tar and manifest
+  to, this run's and earlier runs', and a `paths` entry inside it
+  fails. `path` must not be `RUNNER_TEMP` itself, which holds the
+  runner's own files.
+- **`.git` is never packed.** `pack` skips any `.git` file or
+  directory at any depth, and no input includes it: a `path` or
+  `paths` entry inside `.git` fails. It refuses to run when
+  `path/.git/config` holds an `extraheader`, the credential
+  `actions/checkout` leaves behind: check out with
+  `persist-credentials: false` before packing a tree that holds the
+  checkout.
+- **Refusals.** `pack` fails, rather than ship something `unpack`
+  would reject, on a `paths` entry that does not exist, resolves
+  outside `path` or passes through a symlink; a symlink whose target
+  is absolute, has a `..` after a named segment, or leaves `path`,
+  resolved either against the link's own directory or through the
+  symlinks it passes; a file hard-linked to one outside the
+  selection; a socket, FIFO or device; an entry inside 256 or more
+  nested directories below `path`, which `unpack` refuses; and a
+  file, directory or symlink whose content, mode, type, symlink target,
+  identity or timestamps change during the pack, a selected directory
+  gaining or losing an entry included.
+- **Empty selection.** With `fail-on-empty: true` (the default), a
+  selection with no files fails. With `false`, `pack` uploads an
+  empty tar, with no directory members either, and a manifest with an
+  empty `files` list, and sets `file-count` to `0`:
+  a consumer can tell "nothing built" from "upload missing".
+- **Determinism.** Packing the same tree at the same commit gives a
+  byte-identical tar in any job. The tar sorts members by path, with
+  owner IDs `0`, empty owner names, modes masked to `0777`, and every
+  time, as well as the manifest's `created_at`, set to the commit time
+  of `GITHUB_SHA`, or to the epoch where git cannot give one. The
+  manifest, and so `digest`, also records `artifact-name`, the name of
+  `path` and the run's repository, `GITHUB_SHA`, run ID and attempt
+  (see [Manifest](#manifest)). Jobs of one run attempt that pack the
+  same tree under the same names get the same `digest`; a re-run or
+  another run does not. `digest` pins one run's artefact, not the
+  tree alone.
+
+The step summary lists the artefact's name, file count, total bytes
+and digest.
 
 ## Inputs
 
@@ -164,7 +223,8 @@ trailing newline, so the same content always gives the same digest:
   directories, so `files` omits them. `root`, by default the last
   component of the packed directory, follows the same path rules.
 - A regular file records its `sha256`, `size` and `mode`, the octal
-  permission bits from `0000` to `7777`. A symlink records its
+  permission bits from `0000` to `7777`; `pack` masks them to `0777`,
+  as the tar stores them. A symlink records its
   `symlink` target as stored, and the action never follows it.
 - `run_id`, `run_attempt`, `repository` and `sha` come from
   `GITHUB_RUN_ID`, `GITHUB_RUN_ATTEMPT`, `GITHUB_REPOSITORY` and
