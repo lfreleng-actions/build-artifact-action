@@ -41,10 +41,11 @@ it creates itself. An existing `destination`, even an empty directory,
 or a symlink above it fails the step. Regular files keep their
 permission bits within `0777`: a tar member whose mode differs from the
 manifest fails the step, and `unpack` drops any setuid, setgid or
-sticky bit the manifest records. The extracted tree must match the
-manifest file for file; on any failure after extraction began the step
-removes `destination` before failing, so a later step never reads a
-partial tree. Nothing in the artefact runs.
+sticky bit the manifest records. Directories get their tar modes back
+within `0777` too, once `unpack` has checked the tree. The extracted
+tree must match the manifest file for file; on any failure after
+extraction began the step removes `destination` before failing, so a
+later step never reads a partial tree. Nothing in the artefact runs.
 
 With `artifact-id`, `actions/download-artifact` reports no trusted name
 for the artefact without a token, which `unpack` does not take. The

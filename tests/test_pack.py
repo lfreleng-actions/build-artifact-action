@@ -228,6 +228,13 @@ class RoundTripTest(PackTestCase):
         verify_tar(manifest, outputs["tar"])
         self.assertEqual(verify_tree(manifest, str(extracted)), 4)
 
+    def test_round_trip_directory_modes(self) -> None:
+        root = self.tree()
+        (root / "lib" / "nested").chmod(0o700)
+        (root / "empty").chmod(0o750)
+        (root / "bin").chmod(0o555)
+        self.assert_same_tree(root, self.unpack(self.packed()))
+
     def test_outputs(self) -> None:
         _ = self.tree()
         outputs = self.packed()

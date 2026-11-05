@@ -195,6 +195,22 @@ class UnpackTestCase(unittest.TestCase):
         )
         return self.write_manifest(manifest)
 
+    def directory_download(self) -> None:
+        """Write a download whose directories have non-default modes."""
+        data = b"data\n"
+        modes = {"a": 0o700, "a/b": 0o555, "c": 0o000, "d": 0o3775}
+        members = [special(name, tarfile.DIRTYPE) for name in modes]
+        for info, _ in members:
+            info.mode = modes[info.name]
+        members.append(regular("a/b/f", data))
+        _ = self.download_of(members, [entry_for("a/b/f", data)])
+
+    def assert_directory_modes(self) -> None:
+        """Assert the directories of directory_download kept their modes."""
+        for name, mode in (("a", 0o700), ("a/b", 0o555), ("c", 0o000), ("d", 0o775)):
+            actual = stat.S_IMODE((self.target / name).lstat().st_mode)
+            self.assertEqual(actual, mode, name)
+
     def environment(self, **overrides: str) -> dict[str, str]:
         """Return the step's environment, with overrides applied."""
         env = {
@@ -337,6 +353,18 @@ class HappyPathTest(UnpackTestCase):
             stat.S_IMODE((target / "bin" / "run.sh").stat().st_mode), 0o755
         )
         self.assertEqual(os.readlink(target / "link"), "bin/run.sh")
+
+    def test_directory_modes_restored(self) -> None:
+        self.directory_download()
+        self.assertEqual(self.run_unpack(), 0, self.stdout)
+        self.assert_directory_modes()
+        self.assertEqual(self.outputs()["file-count"], "1")
+
+    def test_directory_modes_restored_fallback(self) -> None:
+        self.directory_download()
+        with mock.patch.object(unpack, "has_data_filter", return_value=False):
+            self.assertEqual(self.run_unpack(), 0, self.stdout)
+        self.assert_directory_modes()
 
     def test_special_bits_dropped(self) -> None:
         data = b"#!/bin/sh\n"
@@ -713,6 +741,14 @@ class AfterExtractionTest(UnpackTestCase):
 
     def test_output_write_failure_removes_destination(self) -> None:
         _ = self.packed_tree()
+        self.destination = "out/unpacked"
+        self.assert_refused(
+            "cannot write the step outputs", GITHUB_OUTPUT=str(self.base)
+        )
+        self.assertFalse(os.path.lexists(self.workspace / "out"))
+
+    def test_failure_removes_restricted_directories(self) -> None:
+        self.directory_download()
         self.destination = "out/unpacked"
         self.assert_refused(
             "cannot write the step outputs", GITHUB_OUTPUT=str(self.base)

@@ -7,7 +7,9 @@ The 'data' filter extracts regular files owner-readable and writable,
 without group or other write and without setuid, setgid or sticky.
 These helpers put the tar's modes back within 0777, keep owner read
 while the tree is verified, and clear it only afterwards, so a file
-whose mode denies its owner read can still be hashed.
+whose mode denies its owner read can still be hashed. The filter
+also leaves directories at the umask's default mode, so their modes
+from the tar are put back last, once nothing else needs to walk them.
 """
 
 from __future__ import annotations
@@ -16,9 +18,9 @@ import copy
 import os
 import stat
 import tarfile
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 
-from scripts.manifest import Manifest, open_parent, open_regular
+from scripts.manifest import Manifest, open_dir, open_parent, open_regular
 from scripts.manifest_schema import fail
 
 # The 'data' filter drops setuid, setgid and sticky, and unpack never
@@ -110,3 +112,60 @@ def drop_owner_read(root: str, files: Mapping[str, tarfile.TarInfo]) -> None:
         actual = stat.S_IMODE(info.st_mode)
         if actual != mode:
             fail(f"{name}: mode {actual:04o} is not {mode:04o}")
+
+
+def restore_dir_modes(root: str, members: Iterable[tarfile.TarInfo]) -> None:
+    """Set each directory member's mode from the tar, within 0777, and check it.
+
+    Runs after drop_owner_read, deepest directory first, so no mode set
+    here can deny the walks before it or the opens of the directories
+    still to set: each is opened through ancestors not yet changed.
+    """
+    directories = sorted(
+        (member for member in members if member.isdir()),
+        key=lambda member: member.name.count("/"),
+        reverse=True,
+    )
+    for member in directories:
+        name, mode = member.name, member.mode & SAFE_MODE
+        parent, base = open_parent(root, name)
+        try:
+            fd = open_dir(base, name, parent)
+        finally:
+            os.close(parent)
+        try:
+            os.fchmod(fd, mode)
+            actual = stat.S_IMODE(os.fstat(fd).st_mode)
+        except OSError as error:
+            fail(f"{name}: cannot set mode: {error.strerror}")
+        finally:
+            os.close(fd)
+        if actual != mode:
+            fail(f"{name}: mode {actual:04o} is not {mode:04o}")
+
+
+def open_up(top: str) -> None:
+    """Give the owner full access to every directory under top, top down.
+
+    restore_dir_modes can leave a directory its owner cannot list or
+    write, which shutil.rmtree could not then empty. Nothing else writes
+    the tree this step created, so a path lstat finds a directory is
+    still one when chmod follows it. Best effort: a directory this
+    cannot change is left for rmtree to report.
+    """
+    pending = [top]
+    while pending:
+        path = pending.pop()
+        try:
+            info = os.lstat(path)
+            if not stat.S_ISDIR(info.st_mode):
+                continue
+            os.chmod(path, stat.S_IMODE(info.st_mode) | stat.S_IRWXU)
+            with os.scandir(path) as entries:
+                pending.extend(
+                    entry.path
+                    for entry in entries
+                    if entry.is_dir(follow_symlinks=False)
+                )
+        except OSError:
+            continue
