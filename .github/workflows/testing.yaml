@@ -51,9 +51,9 @@ jobs:
           persist-credentials: false
 
       # The unit tests include tests/test_stubs.py, which asserts that
-      # pack.py and unpack.py exit 1 with their "not implemented"
-      # diagnostic, so the pack failure below is that one and not a
-      # missing or crashing script.
+      # pack.py exits 1 with its "not implemented" diagnostic, so the
+      # pack failure below is that one and not a missing or crashing
+      # script.
       - name: "Run unit tests"
         shell: bash
         run: |

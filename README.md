@@ -13,8 +13,8 @@
 Packs a directory tree into a workflow artefact in one job, and unpacks
 it in another.
 
-> **Note:** the interface below validates its inputs, but packing and
-> unpacking are not implemented yet; both modes fail after validation.
+> **Note:** packing is not implemented yet; `pack` mode fails after
+> validating its inputs.
 
 ## build-artifact-action
 
@@ -22,6 +22,41 @@ it in another.
   the artefact `artifact-name`.
 - **unpack** downloads the artefact `artifact-name` (or `artifact-id`)
   and extracts it into `destination`.
+
+## Unpack
+
+The consumer treats the artefact as untrusted data: the job that
+produced it ran the project's code, while the consumer may hold a
+credential. `unpack` downloads the artefact of this run, never another,
+into a scratch directory under `RUNNER_TEMP`. It extracts nothing until
+the download holds the tar, its manifest and nothing else, the manifest names
+`artifact-name` and this run's ID, hashes to `expected-digest` when
+given, and matches the tar. It then checks every tar member before
+extracting any. Absolute paths, `..` segments, paths nested more than
+256 levels deep, devices and FIFOs, hard links to anything but an
+earlier regular member or with a mode other than that member's,
+symlinks whose target leaves the root or has a `..` after a named
+segment, members written through an earlier symlink, and members the
+manifest does not list all fail the step. Symlink targets keep their
+stored spelling, `./bin/run.sh` included. It extracts with
+Python's `tarfile` `data` filter, never `tar(1)`, into a `destination`
+it creates itself. An existing `destination`, even an empty directory,
+or a symlink above it fails the step. Regular files keep their
+permission bits within `0777`: a tar member whose mode differs from the
+manifest fails the step, and `unpack` drops any setuid, setgid or
+sticky bit the manifest records. The extracted tree must match the
+manifest file for file; on any failure after extraction began the step
+removes `destination` before failing, so a later step never reads a
+partial tree. Nothing in the artefact runs.
+
+With `artifact-id`, `actions/download-artifact` reports no trusted name
+for the artefact without a token, which `unpack` does not take. The
+name is then informational: `unpack` compares `artifact-name` with the
+name the manifest records as a consistency check, and a producer
+could write any name there. What binds the content on that path is the
+immutable ID the producer's upload returned, the manifest's run ID
+matching this run, and `expected-digest`; pass `expected-digest` to
+bind the content you unpack to the manifest the producer emitted.
 
 ## Usage Example
 
