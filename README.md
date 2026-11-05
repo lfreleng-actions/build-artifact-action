@@ -85,5 +85,62 @@ The workspace's own path may pass through a symlink.
 
 <!-- markdownlint-enable MD013 -->
 
+## Manifest
+
+Each packed artefact holds two files at its top level:
+`build-artifact.tar`, the packed tree, and
+`build-artifact.manifest.json`, the digest manifest. The `digest`
+output is the SHA-256 of the manifest file's bytes. A consumer that
+passes it back as `expected-digest` pins the content of the artefact,
+not its name: `unpack` extracts nothing unless the manifest hashes to
+that digest, the tar matches the manifest, and the extracted tree
+matches the manifest file for file.
+
+The manifest is UTF-8 JSON with sorted keys, a two-space indent and a
+trailing newline, so the same content always gives the same digest:
+
+<!-- markdownlint-disable MD013 -->
+
+```json
+{
+  "action": "lfreleng-actions/build-artifact-action",
+  "artifact_name": "maven-m2repo",
+  "created_at": "2026-11-04T12:00:00Z",
+  "files": [
+    { "mode": "0755", "path": "bin/run.sh", "sha256": "...", "size": 88 },
+    { "path": "link", "symlink": "bin/run.sh" },
+    { "mode": "0644", "path": "org/onap/cps/cps-parent/1.0.0/cps-parent-1.0.0.pom", "sha256": "...", "size": 4021 }
+  ],
+  "repository": "onap/cps",
+  "root": "m2repo",
+  "run_attempt": "1",
+  "run_id": "41830119310",
+  "schema": 1,
+  "sha": "32250c531...",
+  "tar": { "path": "build-artifact.tar", "sha256": "...", "size": 123456 }
+}
+```
+
+<!-- markdownlint-enable MD013 -->
+
+- `files` lists every regular file and symlink under `root`, sorted by
+  `path`. Paths are relative to `root`, use `/` separators, and never
+  start with `./` or contain a `..` segment. The tar carries
+  directories, so `files` omits them. `root`, by default the last
+  component of the packed directory, follows the same path rules.
+- A regular file records its `sha256`, `size` and `mode`, the octal
+  permission bits from `0000` to `7777`. A symlink records its
+  `symlink` target as stored, and the action never follows it.
+- `run_id`, `run_attempt`, `repository` and `sha` come from
+  `GITHUB_RUN_ID`, `GITHUB_RUN_ATTEMPT`, `GITHUB_REPOSITORY` and
+  `GITHUB_SHA`, so a consumer can refuse an artefact from a different
+  run attempt.
+- `scripts/manifest.py` writes and verifies the manifest. Verification
+  fails on the first problem with an `::error::` line naming it: a
+  malformed manifest, a tar whose size or SHA-256 differs, an
+  extracted tree with a missing, changed or unlisted file, a listed
+  file reached through a symlinked directory, or a root that is not a
+  real directory.
+
 [pre-commit.ci results page]: https://results.pre-commit.ci/latest/github/lfreleng-actions/build-artifact-action/main
 [pre-commit.ci status badge]: https://results.pre-commit.ci/badge/github/lfreleng-actions/build-artifact-action/main.svg
