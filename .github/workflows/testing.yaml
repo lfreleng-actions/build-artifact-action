@@ -50,46 +50,65 @@ jobs:
         with:
           persist-credentials: false
 
-      # The unit tests include tests/test_stubs.py, which asserts that
-      # pack.py exits 1 with its "not implemented" diagnostic, so the
-      # pack failure below is that one and not a missing or crashing
-      # script.
       - name: "Run unit tests"
         shell: bash
         run: |
           # Run unit tests
           python3 -m unittest discover -s tests
 
-      # Until the pack mode is implemented, valid pack inputs pass
-      # validation and then fail in the Pack step. The artifact-name
-      # output comes from the validation step, so a non-empty value
-      # shows the failure came after validation, from the Pack step.
+      # Pack the checkout twice under one name: the second run replaces
+      # the first, and the same tree must give the same digest.
       - name: "Running local action: ${{ github.repository }} [pack]"
         uses: $/
         id: pack
-        continue-on-error: true
         with:
           mode: "pack"
           artifact-name: "test-artifact"
           path: "."
 
-      - name: "Error if pack did not fail as not implemented"
+      - name: "Running local action: ${{ github.repository }} [repack]"
+        uses: $/
+        id: repack
+        with:
+          mode: "pack"
+          artifact-name: "test-artifact"
+          path: "."
+          overwrite: "true"
+
+      - name: "Error if pack outputs are wrong"
         shell: bash
         env:
-          OUTCOME: ${{ steps.pack.outcome }}
+          ARTIFACT_ID: ${{ steps.pack.outputs.artifact-id }}
           ARTIFACT_NAME: ${{ steps.pack.outputs.artifact-name }}
+          DIGEST: ${{ steps.pack.outputs.digest }}
+          FILE_COUNT: ${{ steps.pack.outputs.file-count }}
+          REPACK_ID: ${{ steps.repack.outputs.artifact-id }}
+          REPACK_DIGEST: ${{ steps.repack.outputs.digest }}
         run: |
-          # Error if pack did not fail as not implemented
-          if [ "$OUTCOME" != "failure" ]; then
-            echo "Error: pack step did not fail ❌"
+          # Error if pack outputs are wrong
+          if ! [[ "$ARTIFACT_ID" =~ ^[0-9]+$ ]] ||
+            ! [[ "$REPACK_ID" =~ ^[0-9]+$ ]]; then
+            echo "Error: pack did not return an artifact-id ❌"
             exit 1
           fi
           if [ "$ARTIFACT_NAME" != "test-artifact" ]; then
-            echo "Error: pack failed in validation, not as unimplemented ❌"
+            echo "Error: unexpected artifact-name '$ARTIFACT_NAME' ❌"
             exit 1
           fi
-          echo "Pack validated, then failed as not implemented ✅"
-          echo "Pack failed as not implemented ✅" >> "$GITHUB_STEP_SUMMARY"
+          if ! [[ "$DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "Error: pack did not return a SHA-256 digest ❌"
+            exit 1
+          fi
+          if ! [[ "$FILE_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Error: pack reported '$FILE_COUNT' files ❌"
+            exit 1
+          fi
+          if [ "$REPACK_DIGEST" != "$DIGEST" ]; then
+            echo "Error: packing the same tree changed the digest ❌"
+            exit 1
+          fi
+          echo "Packed $FILE_COUNT files reproducibly ✅"
+          echo "Packed $FILE_COUNT files ✅" >> "$GITHUB_STEP_SUMMARY"
 
       # yamllint disable-line rule:line-length
       - name: "Running local action: ${{ github.repository }} [Override Failure]"

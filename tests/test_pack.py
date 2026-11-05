@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import filecmp
 import hashlib
+import io
 import os
 import stat
 import subprocess
@@ -14,9 +16,14 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from collections.abc import Callable
 from pathlib import Path
+from unittest import mock
 
-from scripts.manifest import load, verify_tar, verify_tree
+from scripts.manifest import ManifestError, load, verify_tar, verify_tree
+from scripts.manifest_schema import FileEntry, RegularEntry
+from scripts.pack import as_packed, members_of, run
+from scripts.tarball import Member, check_members, check_root_dir, write_tar
 from scripts.unpack import MAX_DEPTH, scan_members
 
 PACK = Path(__file__).resolve().parent.parent / "scripts" / "pack.py"
@@ -99,11 +106,25 @@ class PackTestCase(unittest.TestCase):
 
         self.extra, when set, adds to or overrides the environment.
         """
+        env = self.environment(path, paths, fail_on_empty, temp)
+        result = subprocess.run(
+            [sys.executable, "-I", "-B", str(PACK)],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+        return result, read_outputs(Path(env["GITHUB_OUTPUT"]))
+
+    def environment(
+        self, path: str, paths: str, fail_on_empty: str, temp: str
+    ) -> dict[str, str]:
+        """Return the Pack step's environment, with an empty output file."""
         runner_temp = self.base / temp
         runner_temp.mkdir(exist_ok=True)
         output = runner_temp / "github-output"
         _ = output.write_text("")
-        env = {
+        return {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "GITHUB_WORKSPACE": str(self.workspace),
             "RUNNER_TEMP": str(runner_temp),
@@ -118,14 +139,6 @@ class PackTestCase(unittest.TestCase):
             "PACK_FAIL_ON_EMPTY": fail_on_empty,
             **self.extra,
         }
-        result = subprocess.run(
-            [sys.executable, "-I", "-B", str(PACK)],
-            capture_output=True,
-            text=True,
-            env=env,
-            check=False,
-        )
-        return result, read_outputs(output)
 
     def packed(self, **kwargs: str) -> dict[str, str]:
         """Run pack.py, assert it succeeded, and return its outputs."""
@@ -147,8 +160,6 @@ class PackTestCase(unittest.TestCase):
             return archive.getmembers()
 
 
-# Expected to fail until scripts/pack.py implements pack mode.
-@unittest.expectedFailure
 class RoundTripTest(PackTestCase):
     """A packed tree unpacks to an identical tree."""
 
@@ -267,8 +278,6 @@ class RoundTripTest(PackTestCase):
         self.assertEqual(whole["digest"], dotted["digest"])
 
 
-# Expected to fail until scripts/pack.py implements pack mode.
-@unittest.expectedFailure
 class DeterminismTest(PackTestCase):
     """The same tree always gives the same tar and manifest bytes."""
 
@@ -318,8 +327,6 @@ class DeterminismTest(PackTestCase):
         self.assertEqual(manifest["sha"], sha)
 
 
-# Expected to fail until scripts/pack.py implements pack mode.
-@unittest.expectedFailure
 class GitTest(PackTestCase):
     """.git is never packed and a persisted credential stops the run."""
 
@@ -364,8 +371,6 @@ class GitTest(PackTestCase):
         self.assertEqual(self.packed()["file-count"], "4")
 
 
-# Expected to fail until scripts/pack.py implements pack mode.
-@unittest.expectedFailure
 class RefusalTest(PackTestCase):
     """Anything a consumer could not safely unpack is refused."""
 
@@ -450,6 +455,23 @@ class RefusalTest(PackTestCase):
         self.assertEqual(manifest["files"], [])
         self.assertEqual(self.members(outputs["tar"]), [])
 
+    def test_empty_directory_gaining_entry_refused(self) -> None:
+        empty = self.workspace / "dist" / "empty-dir"
+        empty.mkdir(parents=True)
+
+        def write_then_add(
+            root: str, members: list[Member], tar_path: str, mtime: int
+        ) -> None:
+            write_tar(root, members, tar_path, mtime)
+            (empty / "late.txt").touch()
+
+        env = self.environment("dist", "empty-dir", "false", "runner-temp")
+        with mock.patch("scripts.pack.write_tar", side_effect=write_then_add):
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                with self.assertRaises(ManifestError):
+                    _ = run(env)
+        self.assertIn("empty-dir: changed while it was being packed", out.getvalue())
+
     def test_scratch_inside_root_excluded(self) -> None:
         _ = self.tree()
         outputs = self.packed(path=".", temp="workspace/.runner-temp")
@@ -505,6 +527,195 @@ class RefusalTest(PackTestCase):
         self.assert_refused(
             f"nested deeper than {MAX_DEPTH} levels", fail_on_empty="false"
         )
+
+
+class ArchivedMetadataTest(unittest.TestCase):
+    """The manifest must describe each entry exactly as the tar holds it."""
+
+    SHA: str = "0" * 64
+
+    def member(self, kind: int, mode: int = 0o644, target: str = "") -> Member:
+        """Return a member of the given file type, as write_tar leaves it."""
+        info = os.stat_result((kind | mode, 0, 0, 1, 0, 0, 3, 0, 0, 0))
+        member = Member("a", info, target=target)
+        if stat.S_ISREG(kind):
+            member.sha256, member.size, member.mode = self.SHA, 3, mode
+        return member
+
+    def assert_changed(self, entry: FileEntry, member: Member) -> None:
+        """Assert as_packed refuses entry against member."""
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            with self.assertRaises(ManifestError):
+                _ = as_packed(entry, {"a": member})
+        self.assertIn("changed while it was being packed", out.getvalue())
+
+    def regular(self, mode: str) -> RegularEntry:
+        """Return a regular-file manifest entry with the given mode."""
+        return {"path": "a", "sha256": self.SHA, "size": 3, "mode": mode}
+
+    def test_matching_entry_masked(self) -> None:
+        entry = as_packed(self.regular("4755"), {"a": self.member(stat.S_IFREG, 0o755)})
+        self.assertEqual(entry, self.regular("0755"))
+
+    def test_mode_change_refused(self) -> None:
+        self.assert_changed(self.regular("0644"), self.member(stat.S_IFREG, 0o755))
+
+    def test_symlink_target_change_refused(self) -> None:
+        member = self.member(stat.S_IFLNK, target="old")
+        self.assert_changed({"path": "a", "symlink": "new"}, member)
+
+    def test_file_replaced_by_symlink_refused(self) -> None:
+        member = self.member(stat.S_IFREG)
+        self.assert_changed({"path": "a", "symlink": "b"}, member)
+
+    def test_symlink_replaced_by_file_refused(self) -> None:
+        member = self.member(stat.S_IFLNK, target="b")
+        self.assert_changed(self.regular("0644"), member)
+
+
+class ReplacedFileTest(unittest.TestCase):
+    """An entry changed after selection is refused, not archived."""
+
+    _base: Path | None = None
+
+    @property
+    def base(self) -> Path:
+        """Return a temporary directory holding an empty 'root'."""
+        if self._base is None:
+            tmp = tempfile.TemporaryDirectory()
+            self.addCleanup(tmp.cleanup)
+            self._base = Path(os.path.realpath(tmp.name))
+            (self._base / "root").mkdir()
+        return self._base
+
+    @property
+    def root(self) -> Path:
+        """Return the packed root."""
+        return self.base / "root"
+
+    def assert_changed(self, path: str, members: list[Member]) -> None:
+        """Assert write_tar refuses members because path changed."""
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            with self.assertRaises(ManifestError):
+                write_tar(str(self.root), members, str(self.base / "out.tar"), 0)
+        self.assertIn(f"{path}: changed while it was being packed", out.getvalue())
+
+    def test_hard_link_swapped_in_refused(self) -> None:
+        _ = (self.root / "a").write_text("inside\n")
+        outside = self.base / "outside"
+        _ = outside.write_text("secret\n")
+        member = Member("a", os.lstat(self.root / "a"))
+        (self.root / "a").unlink()
+        os.link(outside, self.root / "a")
+        self.assert_changed("a", [member])
+
+    def test_file_rewritten_in_place_refused(self) -> None:
+        _ = (self.root / "a").write_text("before\n")
+        member = Member("a", os.lstat(self.root / "a"))
+        _ = (self.root / "a").write_text("rewritten in place\n")
+        self.assert_changed("a", [member])
+
+    def test_file_mode_changed_refused(self) -> None:
+        (self.root / "a").touch(mode=0o644)
+        os.chmod(self.root / "a", 0o644)
+        member = Member("a", os.lstat(self.root / "a"))
+        os.chmod(self.root / "a", 0o755)
+        self.assert_changed("a", [member])
+
+    def test_directory_mode_changed_refused(self) -> None:
+        (self.root / "d").mkdir(mode=0o755)
+        os.chmod(self.root / "d", 0o755)
+        member = Member("d", os.lstat(self.root / "d"))
+        os.chmod(self.root / "d", 0o700)
+        self.assert_changed("d", [member])
+
+    def test_directory_replaced_refused(self) -> None:
+        (self.root / "d").mkdir()
+        (self.root / "e").mkdir()
+        member = Member("d", os.lstat(self.root / "d"))
+        (self.root / "d").rmdir()
+        _ = (self.root / "e").rename(self.root / "d")
+        self.assert_changed("d", [member])
+
+    def test_symlink_replaced_refused(self) -> None:
+        (self.root / "a").symlink_to("b")
+        member = Member("a", os.lstat(self.root / "a"), target="b")
+        (self.root / "a").unlink()
+        (self.root / "a").symlink_to("b")
+        self.assert_changed("a", [member])
+
+    def assert_changed_after_writing(
+        self, path: str, members: list[Member], change: Callable[[], None]
+    ) -> None:
+        """Assert check_members refuses members once change runs after write_tar.
+
+        It must pass before the change, so the refusal is the change's.
+        """
+        write_tar(str(self.root), members, str(self.base / "out.tar"), 0)
+        check_members(str(self.root), members)
+        change()
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            with self.assertRaises(ManifestError):
+                check_members(str(self.root), members)
+        self.assertIn(f"{path}: changed while it was being packed", out.getvalue())
+
+    def test_directory_changed_after_writing_refused(self) -> None:
+        (self.root / "d").mkdir(mode=0o755)
+        os.chmod(self.root / "d", 0o755)
+        member = Member("d", os.lstat(self.root / "d"))
+        self.assert_changed_after_writing(
+            "d", [member], lambda: os.chmod(self.root / "d", 0o700)
+        )
+
+    def test_directory_child_added_after_writing_refused(self) -> None:
+        (self.root / "d").mkdir()
+        member = Member("d", os.lstat(self.root / "d"))
+        self.assert_changed_after_writing(
+            "d", [member], lambda: (self.root / "d" / "late.txt").touch()
+        )
+
+    def test_file_swapped_after_writing_refused(self) -> None:
+        _ = (self.root / "a").write_text("same\n")
+        os.chmod(self.root / "a", 0o644)
+        outside = self.base / "outside"
+        _ = outside.write_text("same\n")
+        os.chmod(outside, 0o644)
+        member = Member("a", os.lstat(self.root / "a"))
+
+        def swap() -> None:
+            (self.root / "a").unlink()
+            os.link(outside, self.root / "a")
+
+        self.assert_changed_after_writing("a", [member], swap)
+
+    def test_symlink_replaced_after_writing_refused(self) -> None:
+        (self.root / "a").symlink_to("b")
+        member = Member("a", os.lstat(self.root / "a"), target="b")
+
+        def replace() -> None:
+            (self.root / "a").unlink()
+            (self.root / "a").symlink_to("b")
+
+        self.assert_changed_after_writing("a", [member], replace)
+
+    def test_root_child_added_refused(self) -> None:
+        before = os.lstat(self.root)
+        check_root_dir(str(self.root), before)
+        (self.root / "late.txt").touch()
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            with self.assertRaises(ManifestError):
+                check_root_dir(str(self.root), before)
+        self.assertIn(f"{self.root}: changed while it was being packed", out.getvalue())
+
+    def test_symlink_replaced_before_capture_refused(self) -> None:
+        (self.root / "a").symlink_to("b")
+        selected = os.lstat(self.root / "a")
+        (self.root / "a").unlink()
+        (self.root / "a").symlink_to("c")
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            with self.assertRaises(ManifestError):
+                _ = members_of(str(self.root), {"a": selected})
+        self.assertIn("a: changed while it was being packed", out.getvalue())
 
 
 if __name__ == "__main__":

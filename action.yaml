@@ -63,7 +63,7 @@ inputs:
 outputs:
   artifact-id:
     description: "[pack] The ID actions/upload-artifact returned"
-    value: ${{ steps.pack.outputs.artifact-id }}
+    value: ${{ steps.upload.outputs.artifact-id }}
   artifact-name:
     description: "The artefact name used or verified"
     value: ${{ steps.validate.outputs.artifact_name }}
@@ -103,9 +103,31 @@ runs:
       id: pack
       if: inputs.mode == 'pack'
       shell: bash
+      env:
+        PACK_ROOT: ${{ steps.validate.outputs.root }}
+        PACK_PATHS: ${{ steps.validate.outputs.paths }}
+        PACK_ARTIFACT_NAME: ${{ steps.validate.outputs.artifact_name }}
+        PACK_FAIL_ON_EMPTY: ${{ steps.validate.outputs.fail_on_empty }}
       run: |
         # Pack
-        python3 -I "${GITHUB_ACTION_PATH}/scripts/pack.py"
+        python3 -I -B "${GITHUB_ACTION_PATH}/scripts/pack.py"
+
+    # The tar is the unit of transfer: zipping it again buys little and
+    # costs time on hundreds of MB, so compression is off.
+    - name: "Upload artefact"
+      id: upload
+      if: inputs.mode == 'pack'
+      # yamllint disable-line rule:line-length
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: ${{ steps.validate.outputs.artifact_name }}
+        path: |
+          ${{ steps.pack.outputs.tar }}
+          ${{ steps.pack.outputs.manifest }}
+        retention-days: ${{ steps.validate.outputs.retention_days }}
+        overwrite: ${{ steps.validate.outputs.overwrite }}
+        if-no-files-found: error
+        compression-level: 0
 
     # The artefact is untrusted: download it into a fresh scratch
     # directory under RUNNER_TEMP, never into the workspace.
