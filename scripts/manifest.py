@@ -288,7 +288,7 @@ def build(
     files = tree_entries(root, entries)
     tar_sha256, tar_size = hash_file(tar_path)
     if created_at is None:
-        now = datetime.datetime.now(datetime.timezone.utc)
+        now = datetime.datetime.now(datetime.UTC)
         created_at = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     return {
         "schema": SCHEMA,
