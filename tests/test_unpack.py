@@ -246,7 +246,6 @@ class UnpackTestCase(unittest.TestCase):
 class HappyPathTest(UnpackTestCase):
     """A packed tree extracts intact and reports its outputs."""
 
-    @unittest.expectedFailure
     def test_extracts_tree(self) -> None:
         digest = self.packed_tree()
         self.assertEqual(self.run_unpack(), 0, self.stdout)
@@ -272,7 +271,6 @@ class HappyPathTest(UnpackTestCase):
         self.assertIn(digest, summary)
         self.assertIn("5 files", summary)
 
-    @unittest.expectedFailure
     def test_runs_as_isolated_script(self) -> None:
         _ = self.packed_tree()
         result = subprocess.run(
@@ -286,19 +284,16 @@ class HappyPathTest(UnpackTestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertTrue((self.target / "bin" / "run.sh").is_file())
 
-    @unittest.expectedFailure
     def test_expected_digest_matches(self) -> None:
         self.expected_digest = self.packed_tree()
         self.assertEqual(self.run_unpack(), 0, self.stdout)
 
-    @unittest.expectedFailure
     def test_creates_missing_parents(self) -> None:
         _ = self.packed_tree()
         self.destination = "out/deep/unpacked"
         self.assertEqual(self.run_unpack(), 0, self.stdout)
         self.assertTrue((self.target / "bin" / "run.sh").is_file())
 
-    @unittest.expectedFailure
     def test_destination_with_leading_dot(self) -> None:
         _ = self.packed_tree()
         self.destination = "./unpacked"
@@ -308,7 +303,6 @@ class HappyPathTest(UnpackTestCase):
         )
         self.assertTrue((self.target / "bin" / "run.sh").is_file())
 
-    @unittest.expectedFailure
     def test_destination_with_inner_dot(self) -> None:
         _ = self.packed_tree()
         self.destination = "out/./unpacked"
@@ -318,7 +312,6 @@ class HappyPathTest(UnpackTestCase):
         )
         self.assertTrue((self.target / "bin" / "run.sh").is_file())
 
-    @unittest.expectedFailure
     def test_extractall_uses_data_filter(self) -> None:
         _ = self.packed_tree()
         original = tarfile.TarFile.extractall
@@ -335,7 +328,6 @@ class HappyPathTest(UnpackTestCase):
         self.assertEqual(calls[0].get("filter"), "data")
         self.assertIs(calls[0].get("numeric_owner"), False)
 
-    @unittest.expectedFailure
     def test_fallback_without_data_filter(self) -> None:
         _ = self.packed_tree()
         with mock.patch.object(unpack, "has_data_filter", return_value=False):
@@ -346,7 +338,6 @@ class HappyPathTest(UnpackTestCase):
         )
         self.assertEqual(os.readlink(target / "link"), "bin/run.sh")
 
-    @unittest.expectedFailure
     def test_special_bits_dropped(self) -> None:
         data = b"#!/bin/sh\n"
         files = [entry_for("tool", data, 0o4755), entry_for("dir-bits", data, 0o3644)]
@@ -356,7 +347,6 @@ class HappyPathTest(UnpackTestCase):
         self.assertEqual(stat.S_IMODE((self.target / "tool").stat().st_mode), 0o755)
         self.assertEqual(stat.S_IMODE((self.target / "dir-bits").stat().st_mode), 0o644)
 
-    @unittest.expectedFailure
     def test_owner_unreadable_file(self) -> None:
         data = b"secret\n"
         link, _ = special("secret-link", tarfile.LNKTYPE, "secret")
@@ -373,7 +363,6 @@ class HappyPathTest(UnpackTestCase):
             self.assertEqual(mode, 0o044, name)
         self.assertEqual(self.outputs()["file-count"], "2")
 
-    @unittest.expectedFailure
     def test_owner_unreadable_files_within_descriptor_limit(self) -> None:
         data = b"secret\n"
         members: list[Member] = []
@@ -427,14 +416,12 @@ class HappyPathTest(UnpackTestCase):
         _ = self.download_of(members, files)
         return links
 
-    @unittest.expectedFailure
     def test_symlink_targets_with_dot_segments(self) -> None:
         links = self.dot_link_download()
         self.assertEqual(self.run_unpack(), 0, self.stdout)
         for name, target in links.items():
             self.assertEqual(os.readlink(self.target / name), target, name)
 
-    @unittest.expectedFailure
     def test_symlink_targets_with_dot_segments_fallback(self) -> None:
         links = self.dot_link_download()
         with mock.patch.object(unpack, "has_data_filter", return_value=False):
@@ -442,7 +429,6 @@ class HappyPathTest(UnpackTestCase):
         for name, target in links.items():
             self.assertEqual(os.readlink(self.target / name), target, name)
 
-    @unittest.expectedFailure
     def test_nesting_at_depth_limit(self) -> None:
         data = b"deep\n"
         name = "/".join(["d"] * (DEPTH_LIMIT - 1) + ["f"])
@@ -455,7 +441,6 @@ class HappyPathTest(UnpackTestCase):
 class DestinationTest(UnpackTestCase):
     """The extraction root must be new and inside the workspace."""
 
-    @unittest.expectedFailure
     def test_existing_empty_destination(self) -> None:
         _ = self.packed_tree()
         self.target.mkdir()
@@ -463,7 +448,6 @@ class DestinationTest(UnpackTestCase):
         self.assertIn("must not exist", self.stdout)
         self.assertEqual(list(self.target.iterdir()), [])
 
-    @unittest.expectedFailure
     def test_symlinked_ancestor(self) -> None:
         _ = self.packed_tree()
         elsewhere = self.base / "elsewhere"
@@ -474,7 +458,6 @@ class DestinationTest(UnpackTestCase):
         self.assertIn("symlink", self.stdout)
         self.assertEqual(list(elsewhere.iterdir()), [])
 
-    @unittest.expectedFailure
     def test_destination_normalising_to_workspace(self) -> None:
         _ = self.packed_tree()
         self.destination = "./."
@@ -487,13 +470,11 @@ class DestinationTest(UnpackTestCase):
 class DownloadTest(UnpackTestCase):
     """The download holds exactly the tar and a manifest that match."""
 
-    @unittest.expectedFailure
     def test_extra_download_file(self) -> None:
         _ = self.packed_tree()
         _ = (self.download / "extra.txt").write_text("extra\n")
         self.assert_refused("download must hold exactly")
 
-    @unittest.expectedFailure
     def test_tar_sha256_mismatch(self) -> None:
         _ = self.packed_tree()
         tar = self.download / TAR_NAME
@@ -502,25 +483,21 @@ class DownloadTest(UnpackTestCase):
         _ = tar.write_bytes(bytes(data))
         self.assert_refused("SHA-256 does not match the manifest")
 
-    @unittest.expectedFailure
     def test_tar_size_mismatch(self) -> None:
         _ = self.packed_tree()
         with (self.download / TAR_NAME).open("ab") as handle:
             _ = handle.write(b"\0" * 512)
         self.assert_refused("does not match manifest")
 
-    @unittest.expectedFailure
     def test_run_id_mismatch(self) -> None:
         _ = self.packed_tree()
         self.assert_refused("artefact comes from another run", GITHUB_RUN_ID="1")
 
-    @unittest.expectedFailure
     def test_expected_digest_mismatch(self) -> None:
         _ = self.packed_tree()
         self.expected_digest = "0" * 64
         self.assert_refused("expected-digest")
 
-    @unittest.expectedFailure
     def test_artifact_name_mismatch(self) -> None:
         _ = self.packed_tree()
         self.assert_refused("artifact_name", INPUT_ARTIFACT_NAME="other")
@@ -535,26 +512,21 @@ class MemberTest(UnpackTestCase):
         _ = self.download_of(members, [])
         self.assert_refused(message)
 
-    @unittest.expectedFailure
     def test_absolute_member(self) -> None:
         self.refuse_members([regular("/tmp/evil", b"x")], "is absolute")
 
-    @unittest.expectedFailure
     def test_dotdot_member(self) -> None:
         self.refuse_members([regular("../evil", b"x")], "'..' segment")
 
-    @unittest.expectedFailure
     def test_symlink_to_etc(self) -> None:
         self.refuse_members(
             [special("etc", tarfile.SYMTYPE, "/etc")], "symlink target is absolute"
         )
 
-    @unittest.expectedFailure
     def test_symlink_to_parent_then_member(self) -> None:
         members = [special("a", tarfile.SYMTYPE, ".."), regular("a/x", b"x")]
         self.refuse_members(members, "symlink target leaves the root")
 
-    @unittest.expectedFailure
     def test_member_through_symlink(self) -> None:
         members = [
             special("sub", tarfile.DIRTYPE),
@@ -563,7 +535,6 @@ class MemberTest(UnpackTestCase):
         ]
         self.refuse_members(members, "written through symlink 'a'")
 
-    @unittest.expectedFailure
     def test_symlink_climbing_too_far(self) -> None:
         members = [
             special("d", tarfile.DIRTYPE),
@@ -571,7 +542,6 @@ class MemberTest(UnpackTestCase):
         ]
         self.refuse_members(members, "symlink target leaves the root")
 
-    @unittest.expectedFailure
     def test_symlink_dotdot_after_segment(self) -> None:
         members = [
             special("d", tarfile.DIRTYPE),
@@ -580,23 +550,19 @@ class MemberTest(UnpackTestCase):
         ]
         self.refuse_members(members, "symlink target has '..' after a named segment")
 
-    @unittest.expectedFailure
     def test_symlink_dot_then_climbing_too_far(self) -> None:
         members = [special("x", tarfile.SYMTYPE, "./..")]
         self.refuse_members(members, "symlink target leaves the root")
 
-    @unittest.expectedFailure
     def test_nesting_beyond_depth_limit(self) -> None:
         name = "/".join(["d"] * DEPTH_LIMIT + ["f"])
         self.refuse_members([regular(name, b"x")], "nested deeper than 256 levels")
 
-    @unittest.expectedFailure
     def test_hard_link_outside(self) -> None:
         self.refuse_members(
             [special("passwd", tarfile.LNKTYPE, "/etc/passwd")], "hard link"
         )
 
-    @unittest.expectedFailure
     def test_hard_link_mode_differs(self) -> None:
         data = b"secret\n"
         link, _ = special("secret-link", tarfile.LNKTYPE, "secret")
@@ -609,7 +575,6 @@ class MemberTest(UnpackTestCase):
         _ = self.download_of(members, files)
         self.assert_refused("hard link mode differs from 'secret'")
 
-    @unittest.expectedFailure
     def test_malformed_sparse_member(self) -> None:
         data = b"sparse\n"
         member, _ = regular("sparse", data)
@@ -617,7 +582,6 @@ class MemberTest(UnpackTestCase):
         _ = self.download_of([(member, data)], [entry_for("sparse", data)])
         self.assert_refused("cannot read as an uncompressed tar")
 
-    @unittest.expectedFailure
     def test_chained_pax_headers(self) -> None:
         data = b"shallow\n"
         info, _ = regular("shallow", data)
@@ -635,25 +599,21 @@ class MemberTest(UnpackTestCase):
         _ = self.write_manifest(self.manifest_for([entry_for("shallow", data)]))
         self.assert_refused("header chain too long")
 
-    @unittest.expectedFailure
     def test_device_member(self) -> None:
         self.refuse_members([special("null", tarfile.CHRTYPE)], "device or FIFO member")
 
-    @unittest.expectedFailure
     def test_member_missing_from_manifest(self) -> None:
         data = b"listed\n"
         members = [regular("listed", data), regular("unlisted", b"x")]
         _ = self.download_of(members, [entry_for("listed", data)])
         self.assert_refused("not listed in the manifest")
 
-    @unittest.expectedFailure
     def test_mode_mismatch(self) -> None:
         data = b"listed\n"
         files = [entry_for("listed", data, 0o644)]
         _ = self.download_of([regular("listed", data, 0o755)], files)
         self.assert_refused("mode does not match the manifest")
 
-    @unittest.expectedFailure
     def test_manifest_entry_missing_from_tar(self) -> None:
         data = b"listed\n"
         files = [entry_for("listed", data), entry_for("missing", b"x")]
@@ -665,7 +625,6 @@ class MemberTest(UnpackTestCase):
 class AfterExtractionTest(UnpackTestCase):
     """A tree that fails verification after extraction is removed."""
 
-    @unittest.expectedFailure
     def test_unlisted_file_after_extraction(self) -> None:
         _ = self.packed_tree()
         self.destination = "out/unpacked"
@@ -692,12 +651,10 @@ class AfterExtractionTest(UnpackTestCase):
         ]
         _ = self.download_of([regular("first.txt", data), (link, None)], files)
 
-    @unittest.expectedFailure
     def test_symlink_target_with_nul(self) -> None:
         self.nul_link_download()
         self.assert_refused("symlink target contains a NUL byte")
 
-    @unittest.expectedFailure
     def test_extraction_value_error_removes_destination(self) -> None:
         self.nul_link_download()
         self.destination = "out/unpacked"
@@ -705,7 +662,6 @@ class AfterExtractionTest(UnpackTestCase):
             self.assert_refused("extraction failed")
         self.assertFalse(os.path.lexists(self.workspace / "out"))
 
-    @unittest.expectedFailure
     def test_pax_mtime_overflow_removes_destination(self) -> None:
         first, second = b"first\n", b"second\n"
         late, _ = regular("second.txt", second)
@@ -731,21 +687,18 @@ class AfterExtractionTest(UnpackTestCase):
         self.destination = "out/unpacked"
 
     @unittest.skipUnless(REALPATH_RECURSES, "realpath resolves links iteratively")
-    @unittest.expectedFailure
     def test_long_symlink_chain_removes_destination(self) -> None:
         self.symlink_chain_download()
         self.assert_refused("symlink chain too long to resolve")
         self.assertFalse(os.path.lexists(self.workspace / "out"))
 
     @unittest.skipUnless(REALPATH_RECURSES, "realpath resolves links iteratively")
-    @unittest.expectedFailure
     def test_long_symlink_chain_fallback_removes_destination(self) -> None:
         self.symlink_chain_download()
         with mock.patch.object(unpack, "has_data_filter", return_value=False):
             self.assert_refused("symlink chain too long to resolve")
         self.assertFalse(os.path.lexists(self.workspace / "out"))
 
-    @unittest.expectedFailure
     def test_unexpected_error_removes_destination(self) -> None:
         _ = self.packed_tree()
         self.destination = "out/unpacked"
@@ -758,7 +711,6 @@ class AfterExtractionTest(UnpackTestCase):
         boom.assert_called_once()
         self.assertFalse(os.path.lexists(self.workspace / "out"))
 
-    @unittest.expectedFailure
     def test_output_write_failure_removes_destination(self) -> None:
         _ = self.packed_tree()
         self.destination = "out/unpacked"
@@ -767,7 +719,6 @@ class AfterExtractionTest(UnpackTestCase):
         )
         self.assertFalse(os.path.lexists(self.workspace / "out"))
 
-    @unittest.expectedFailure
     def test_summary_write_failure_removes_destination(self) -> None:
         _ = self.packed_tree()
         self.destination = "out/unpacked"

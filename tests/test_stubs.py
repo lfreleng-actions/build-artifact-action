@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 
-"""Tests for the scripts/pack.py and scripts/unpack.py stubs."""
+"""Tests for the scripts/pack.py stub."""
 
 from __future__ import annotations
 
@@ -14,19 +14,17 @@ SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 
 
 class StubTest(unittest.TestCase):
-    """Each mode fails with its own 'not implemented' diagnostic."""
+    """The pack mode fails with its 'not implemented' diagnostic."""
 
-    def test_modes_not_implemented(self) -> None:
-        for mode in ("pack", "unpack"):
-            with self.subTest(mode=mode):
-                result = subprocess.run(
-                    [sys.executable, "-I", str(SCRIPTS / f"{mode}.py")],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                self.assertEqual(result.returncode, 1)
-                self.assertEqual(result.stdout, f"::error::{mode}: not implemented\n")
+    def test_pack_not_implemented(self) -> None:
+        result = subprocess.run(
+            [sys.executable, "-I", str(SCRIPTS / "pack.py")],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "::error::pack: not implemented\n")
 
 
 if __name__ == "__main__":
