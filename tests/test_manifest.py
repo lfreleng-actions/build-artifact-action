@@ -133,7 +133,6 @@ class ManifestTestCase(unittest.TestCase):
 class BuildTest(ManifestTestCase):
     """build() and write() produce the documented, canonical format."""
 
-    @unittest.expectedFailure
     def test_structure(self) -> None:
         manifest = self.build()
         self.assertEqual(manifest["schema"], 1)
@@ -175,7 +174,6 @@ class BuildTest(ManifestTestCase):
             ],
         )
 
-    @unittest.expectedFailure
     def test_round_trip(self) -> None:
         manifest = self.build()
         first = self.base / "first.json"
@@ -186,7 +184,6 @@ class BuildTest(ManifestTestCase):
         self.assertEqual(first.read_bytes(), second.read_bytes())
         self.assertEqual(hashlib.sha256(first.read_bytes()).hexdigest(), digest)
 
-    @unittest.expectedFailure
     def test_canonical_json(self) -> None:
         path = self.base / "manifest.json"
         manifest = self.build()
@@ -195,7 +192,6 @@ class BuildTest(ManifestTestCase):
         expected = json.dumps(manifest, sort_keys=True, indent=2, ensure_ascii=False)
         self.assertEqual(text, expected + "\n")
 
-    @unittest.expectedFailure
     def test_entry_order_does_not_matter(self) -> None:
         orders = (
             ["."],
@@ -208,7 +204,6 @@ class BuildTest(ManifestTestCase):
         }
         self.assertEqual(len(digests), 1)
 
-    @unittest.expectedFailure
     def test_symlink_target_not_hashed(self) -> None:
         (self.root / "dangling").symlink_to("no/such/file")
         (self.root / "dirlink").symlink_to("org")
@@ -217,32 +212,26 @@ class BuildTest(ManifestTestCase):
         self.assertIn({"path": "dirlink", "symlink": "org"}, files)
         self.assertFalse(any(f["path"].startswith("dirlink/") for f in files))
 
-    @unittest.expectedFailure
     def test_subset_of_entries(self) -> None:
         paths = [f["path"] for f in self.build(["org"])["files"]]
         self.assertEqual(paths, ["org/pkg/a.pom"])
 
-    @unittest.expectedFailure
     def test_missing_entry_rejected(self) -> None:
         self.assert_fails("absent", lambda: self.build(["absent"]))
 
-    @unittest.expectedFailure
     def test_unsafe_entry_rejected(self) -> None:
         for entry in ("../m2repo", "/etc", "bin/../org"):
             with self.subTest(entry=entry):
                 self.assert_fails(entry, partial(self.build, [entry]))
 
-    @unittest.expectedFailure
     def test_entry_through_symlink_rejected(self) -> None:
         (self.root / "dirlink").symlink_to("org")
         self.assert_fails("dirlink", partial(self.build, ["dirlink/pkg/a.pom"]))
 
-    @unittest.expectedFailure
     def test_special_file_rejected(self) -> None:
         os.mkfifo(self.root / "pipe")
         self.assert_fails("pipe", self.build)
 
-    @unittest.expectedFailure
     def test_invalid_root_rejected(self) -> None:
         for root in self.invalid_roots():
             with self.subTest(root=root):
@@ -257,7 +246,6 @@ class BuildTest(ManifestTestCase):
                 )
                 self.assert_fails(root, call)
 
-    @unittest.expectedFailure
     def test_root_name_from_traversed_spelling(self) -> None:
         elsewhere = self.base / "x" / "y"
         elsewhere.mkdir(parents=True)
@@ -273,7 +261,6 @@ class BuildTest(ManifestTestCase):
         self.assertEqual(manifest["root"], "m2repo")
         self.assertIn({"path": "jump", "symlink": str(elsewhere)}, manifest["files"])
 
-    @unittest.expectedFailure
     def test_unsafe_root_name_rejected(self) -> None:
         for root_name in ("", "/tmp/out", "../outside"):
             with self.subTest(root_name=root_name):
@@ -289,7 +276,6 @@ class BuildTest(ManifestTestCase):
                 )
                 self.assert_fails("root name", call)
 
-    @unittest.expectedFailure
     def test_fifo_tar_rejected(self) -> None:
         call = partial(
             build,
@@ -302,18 +288,15 @@ class BuildTest(ManifestTestCase):
         )
         self.assert_fails("not a regular file", call)
 
-    @unittest.expectedFailure
     def test_read_error_rejected(self) -> None:
         _ = (self.root, self.tar)
         with self.read_error():
             self.assert_fails("cannot read", self.build)
 
-    @unittest.expectedFailure
     def test_unreadable_dir_rejected(self) -> None:
         self.unreadable_dir()
         self.assert_fails("empty: cannot list directory", self.build)
 
-    @unittest.expectedFailure
     def test_write_failure_rejected(self) -> None:
         manifest = self.build()
         for path in (self.base / "absent" / "manifest.json", self.base):
@@ -339,7 +322,6 @@ class LoadTest(ManifestTestCase):
         path = self.write_raw(manifest)
         self.assert_fails(needle, lambda: load(path))
 
-    @unittest.expectedFailure
     def test_missing_key(self) -> None:
         for key in ("schema", "sha", "tar", "files"):
             with self.subTest(key=key):
@@ -347,7 +329,6 @@ class LoadTest(ManifestTestCase):
                 del manifest[key]
                 self.assert_load_fails(f"missing key '{key}'", manifest)
 
-    @unittest.expectedFailure
     def test_missing_file_key(self) -> None:
         manifest = self.manifest()
         files = manifest["files"]
@@ -355,13 +336,11 @@ class LoadTest(ManifestTestCase):
         del files[0]["sha256"]
         self.assert_load_fails("files[0]: missing key 'sha256'", manifest)
 
-    @unittest.expectedFailure
     def test_schema_2(self) -> None:
         manifest = self.manifest()
         manifest["schema"] = 2
         self.assert_load_fails("schema", manifest)
 
-    @unittest.expectedFailure
     def test_bad_paths(self) -> None:
         for path, needle in (
             ("../x", "'..'"),
@@ -375,7 +354,6 @@ class LoadTest(ManifestTestCase):
                 manifest["files"] = [{"path": path, "symlink": "x"}]
                 self.assert_load_fails(needle, manifest)
 
-    @unittest.expectedFailure
     def test_bad_root(self) -> None:
         for root, needle in (
             ("", "empty"),
@@ -388,7 +366,6 @@ class LoadTest(ManifestTestCase):
                 self.assert_load_fails(f"root: {root!r} ", manifest)
                 self.assert_load_fails(needle, manifest)
 
-    @unittest.expectedFailure
     def test_unsorted_files(self) -> None:
         manifest = self.manifest()
         files = manifest["files"]
@@ -396,7 +373,6 @@ class LoadTest(ManifestTestCase):
         files.reverse()
         self.assert_load_fails("not sorted", manifest)
 
-    @unittest.expectedFailure
     def test_path_below_listed_path(self) -> None:
         manifest = self.manifest()
         manifest["files"] = [
@@ -405,7 +381,6 @@ class LoadTest(ManifestTestCase):
         ]
         self.assert_load_fails("lies below", manifest)
 
-    @unittest.expectedFailure
     def test_bad_mode(self) -> None:
         for mode in ("8000", "07777", "644", "-001", "0x1f"):
             with self.subTest(mode=mode):
@@ -415,7 +390,6 @@ class LoadTest(ManifestTestCase):
                 files[0]["mode"] = mode
                 self.assert_load_fails("mode", manifest)
 
-    @unittest.expectedFailure
     def test_bad_types(self) -> None:
         for key, value in (
             ("schema", True),
@@ -431,7 +405,6 @@ class LoadTest(ManifestTestCase):
                 manifest[key] = value
                 self.assert_load_fails(key, manifest)
 
-    @unittest.expectedFailure
     def test_not_utf8_encodable(self) -> None:
         for key, value, needle in (
             ("files", [{"path": "\ud800", "symlink": "x"}], "files[0].path"),
@@ -443,24 +416,20 @@ class LoadTest(ManifestTestCase):
                 manifest[key] = value
                 self.assert_load_fails(needle, manifest)
 
-    @unittest.expectedFailure
     def test_unexpected_key(self) -> None:
         manifest = self.manifest()
         manifest["extra"] = "x"
         self.assert_load_fails("unexpected key 'extra'", manifest)
 
-    @unittest.expectedFailure
     def test_surrogate_key(self) -> None:
         manifest = self.manifest()
         manifest["\ud800"] = 1
         self.assert_load_fails("unexpected key '\\ud800'", manifest)
 
-    @unittest.expectedFailure
     def test_fifo_rejected(self) -> None:
         fifo = self.fifo()
         self.assert_fails("not a regular file", lambda: load(fifo))
 
-    @unittest.expectedFailure
     def test_not_json(self) -> None:
         path = self.base / "manifest.json"
         for data in (b"{", b"\xff", b'{"schema": 1, "schema": 1}', b"NaN"):
@@ -472,11 +441,9 @@ class LoadTest(ManifestTestCase):
 class VerifyTest(ManifestTestCase):
     """verify_tar() and verify_tree() refuse any change to the content."""
 
-    @unittest.expectedFailure
     def test_tar_accepted(self) -> None:
         verify_tar(self.build(), str(self.tar))
 
-    @unittest.expectedFailure
     def test_tar_changed_byte(self) -> None:
         manifest = self.build()
         data = bytearray(self.tar.read_bytes())
@@ -484,13 +451,11 @@ class VerifyTest(ManifestTestCase):
         _ = self.tar.write_bytes(bytes(data))
         self.assert_fails("SHA-256", lambda: verify_tar(manifest, str(self.tar)))
 
-    @unittest.expectedFailure
     def test_tar_fifo(self) -> None:
         manifest = self.build()
         fifo = self.fifo()
         self.assert_fails("not a regular file", lambda: verify_tar(manifest, fifo))
 
-    @unittest.expectedFailure
     def test_tar_read_error(self) -> None:
         manifest = self.build()
         with self.read_error():
@@ -498,18 +463,15 @@ class VerifyTest(ManifestTestCase):
                 "cannot read", lambda: verify_tar(manifest, str(self.tar))
             )
 
-    @unittest.expectedFailure
     def test_tar_changed_size(self) -> None:
         manifest = self.build()
         with self.tar.open("ab") as handle:
             _ = handle.write(b"x")
         self.assert_fails("size", lambda: verify_tar(manifest, str(self.tar)))
 
-    @unittest.expectedFailure
     def test_tree_accepted(self) -> None:
         self.assertEqual(verify_tree(self.build(), str(self.root)), 3)
 
-    @unittest.expectedFailure
     def test_tree_missing_file(self) -> None:
         manifest = self.build()
         (self.root / "org" / "pkg" / "a.pom").unlink()
@@ -517,39 +479,33 @@ class VerifyTest(ManifestTestCase):
             "org/pkg/a.pom", lambda: verify_tree(manifest, str(self.root))
         )
 
-    @unittest.expectedFailure
     def test_tree_changed_file(self) -> None:
         manifest = self.build()
         _ = (self.root / "org" / "pkg" / "a.pom").write_text("<Project/>\n")
         self.assert_fails("SHA-256", lambda: verify_tree(manifest, str(self.root)))
 
-    @unittest.expectedFailure
     def test_tree_changed_size(self) -> None:
         manifest = self.build()
         _ = (self.root / "org" / "pkg" / "a.pom").write_text("<project/>\n\n")
         self.assert_fails("size", lambda: verify_tree(manifest, str(self.root)))
 
-    @unittest.expectedFailure
     def test_tree_wrong_mode(self) -> None:
         manifest = self.build()
         (self.root / "bin" / "run.sh").chmod(0o644)
         self.assert_fails("mode", lambda: verify_tree(manifest, str(self.root)))
 
-    @unittest.expectedFailure
     def test_tree_changed_symlink(self) -> None:
         manifest = self.build()
         (self.root / "link").unlink()
         (self.root / "link").symlink_to("org/pkg/a.pom")
         self.assert_fails("symlink", lambda: verify_tree(manifest, str(self.root)))
 
-    @unittest.expectedFailure
     def test_tree_symlink_replaced_by_file(self) -> None:
         manifest = self.build()
         (self.root / "link").unlink()
         _ = (self.root / "link").write_text("not a link\n")
         self.assert_fails("symlink", lambda: verify_tree(manifest, str(self.root)))
 
-    @unittest.expectedFailure
     def test_tree_extra_file(self) -> None:
         manifest = self.build()
         _ = (self.root / "empty" / "extra.txt").write_text("x\n")
@@ -557,7 +513,6 @@ class VerifyTest(ManifestTestCase):
             "empty/extra.txt", lambda: verify_tree(manifest, str(self.root))
         )
 
-    @unittest.expectedFailure
     def test_tree_parent_replaced_by_symlink(self) -> None:
         manifest = self.build()
         moved = self.base / "elsewhere"
@@ -565,7 +520,6 @@ class VerifyTest(ManifestTestCase):
         (self.root / "org").symlink_to(moved)
         self.assert_fails("org", lambda: verify_tree(manifest, str(self.root)))
 
-    @unittest.expectedFailure
     def test_tree_parent_swapped_after_listing(self) -> None:
         manifest = self.build()
         moved = self.base / "elsewhere"
@@ -583,7 +537,6 @@ class VerifyTest(ManifestTestCase):
                 lambda: verify_tree(manifest, str(self.root)),
             )
 
-    @unittest.expectedFailure
     def test_tree_invalid_root(self) -> None:
         manifest = self.build()
         manifest["files"] = []
@@ -591,7 +544,6 @@ class VerifyTest(ManifestTestCase):
             with self.subTest(root=root):
                 self.assert_fails(root, partial(verify_tree, manifest, root))
 
-    @unittest.expectedFailure
     def test_tree_unreadable_dir(self) -> None:
         manifest = self.build()
         self.unreadable_dir()
@@ -600,7 +552,6 @@ class VerifyTest(ManifestTestCase):
             lambda: verify_tree(manifest, str(self.root)),
         )
 
-    @unittest.expectedFailure
     def test_annotation_surrogate_escaped(self) -> None:
         manifest = self.build()
         if os.geteuid() == 0:
@@ -616,7 +567,6 @@ class VerifyTest(ManifestTestCase):
             out.getvalue().startswith("::error::\\udcff: cannot list directory")
         )
 
-    @unittest.expectedFailure
     def test_annotation_escaped(self) -> None:
         manifest = self.build()
         injected = "zz%\r\n::warning::injected"
