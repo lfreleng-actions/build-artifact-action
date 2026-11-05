@@ -11,79 +11,142 @@
 <!-- prettier-ignore-end -->
 
 Packs a directory tree into a workflow artefact in one job, and unpacks
-it in another.
+it in another, so a job that runs a project's code can hand its output
+to a job that holds a credential without either job doing both.
 
-## build-artifact-action
+## Purpose
+
+A workflow that builds a project and then uses a secret on the result
+splits the work at a hand-off. The job that runs the project's code
+never holds a credential; the job that holds a credential never runs
+the code. The build job packs what it produced, and the credentialed
+job unpacks it as data, checks it, and runs nothing from it.
+
+`java-workflows`, `docker-workflows` and `security-workflows` each
+re-implement this hand-off in inline shell, each with its own checks.
+This action gives them one implementation to share: `pack` writes a
+reproducible tar and a digest [manifest](#manifest), and `unpack`
+verifies both before it extracts anything.
 
 - **pack** uploads the files under `path` (or the listed `paths`) as
   the artefact `artifact-name`.
 - **unpack** downloads the artefact `artifact-name` (or `artifact-id`)
   and extracts it into `destination`.
 
-## Unpack
-
-The consumer treats the artefact as untrusted data: the job that
-produced it ran the project's code, while the consumer may hold a
-credential. `unpack` downloads the artefact of this run, never another,
-into a scratch directory under `RUNNER_TEMP`. It extracts nothing until
-the download holds the tar, its manifest and nothing else, the manifest names
-`artifact-name` and this run's ID, hashes to `expected-digest` when
-given, and matches the tar. It then checks every tar member before
-extracting any. Absolute paths, `..` segments, paths nested more than
-256 levels deep, devices and FIFOs, hard links to anything but an
-earlier regular member or with a mode other than that member's,
-symlinks whose target leaves the root or has a `..` after a named
-segment, members written through an earlier symlink, and members the
-manifest does not list all fail the step. Symlink targets keep their
-stored spelling, `./bin/run.sh` included. It extracts with
-Python's `tarfile` `data` filter, never `tar(1)`, into a `destination`
-it creates itself. An existing `destination`, even an empty directory,
-or a symlink above it fails the step. Regular files keep their
-permission bits within `0777`: a tar member whose mode differs from the
-manifest fails the step, and `unpack` drops any setuid, setgid or
-sticky bit the manifest records. Directories get their tar modes back
-within `0777` too, once `unpack` has checked the tree. The extracted
-tree must match the manifest file for file; on any failure after
-extraction began the step removes `destination` before failing, so a
-later step never reads a partial tree. Nothing in the artefact runs.
-
-With `artifact-id`, `actions/download-artifact` reports no trusted name
-for the artefact without a token, which `unpack` does not take. The
-name is then informational: `unpack` compares `artifact-name` with the
-name the manifest records as a consistency check, and a producer
-could write any name there. What binds the content on that path is the
-immutable ID the producer's upload returned, the manifest's run ID
-matching this run, and `expected-digest`; pass `expected-digest` to
-bind the content you unpack to the manifest the producer emitted.
-
-## Usage Example
+## Usage
 
 Pin the action to the full commit SHA of a release, never to a branch
 or tag, so a workflow runs the code you reviewed. Replace the
-placeholder below with that SHA and name the release in the trailing
-comment.
+placeholders below with those SHAs and name the release in the
+trailing comment.
 
-<!-- markdownlint-disable MD046 -->
+The `build` job runs the project's code with read access and no
+secrets, packs `target/`, and exports the artefact ID and digest. The
+`scan` job holds a secret, does not check out or build anything, and
+unpacks the artefact by ID, pinned to that digest.
+
+<!-- markdownlint-disable MD013 MD046 -->
 
 ```yaml
-steps:
-  - name: "Checkout repository"
-    uses: actions/checkout@<full-commit-sha> # vX.Y.Z
-    with:
-      persist-credentials: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      artifact-id: ${{ steps.pack.outputs.artifact-id }}
+      digest: ${{ steps.pack.outputs.digest }}
+    steps:
+      - name: "Checkout repository"
+        uses: actions/checkout@<full-commit-sha> # vX.Y.Z
+        with:
+          persist-credentials: false
 
-  - name: "Pack build output"
-    id: pack
-    uses: lfreleng-actions/build-artifact-action@<full-commit-sha> # vX.Y.Z
-    with:
-      mode: "pack"
-      artifact-name: "build-output"
-      path: "dist"
+      - name: "Build"
+        run: mvn --batch-mode package
+
+      - name: "Pack build output"
+        id: pack
+        uses: lfreleng-actions/build-artifact-action@<full-commit-sha> # vX.Y.Z
+        with:
+          mode: "pack"
+          artifact-name: "build-output"
+          path: "target"
+
+  scan:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: "Unpack build output"
+        id: unpack
+        uses: lfreleng-actions/build-artifact-action@<full-commit-sha> # vX.Y.Z
+        with:
+          mode: "unpack"
+          artifact-name: "build-output"
+          artifact-id: ${{ needs.build.outputs.artifact-id }}
+          expected-digest: ${{ needs.build.outputs.digest }}
+          destination: "build-output"
+
+      - name: "Scan build output"
+        env:
+          SCAN_TOKEN: ${{ secrets.SCAN_TOKEN }}
+          SCAN_DIR: ${{ steps.unpack.outputs.destination }}
+        run: example-scanner --directory "$SCAN_DIR"
 ```
 
-<!-- markdownlint-enable MD046 -->
+<!-- markdownlint-enable MD013 MD046 -->
 
-## Pack
+The consumer job must name the producer in `needs:`. That orders the
+jobs, so the artefact exists before `unpack` runs, and lets the
+consumer read the producer's `artifact-id` and `digest` outputs.
+Hand-offs stay within one workflow run: `unpack` takes no run ID
+and no token, and refuses a manifest that records another run.
+
+## Inputs
+
+<!-- markdownlint-disable MD013 -->
+
+| Name            | Required | Default   | Modes  | Description                                                                                                                                                         |
+| --------------- | -------- | --------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| mode            | True     |           | both   | `pack` or `unpack`. Anything else fails.                                                                                                                            |
+| artifact-name   | True     |           | both   | Name of the workflow artefact. Must match `^[A-Za-z0-9._-]+$`.                                                                                                      |
+| artifact-id     | False    | `''`      | unpack | Numeric artefact ID from a producer's `artifact-id` output. When set, the action downloads by ID and checks `artifact-name` against the downloaded artefact's name. |
+| path            | False    | `'.'`     | pack   | Directory the packed paths are relative to. `.` or relative segments of `[A-Za-z0-9._-]`, with no `..` segment. Must resolve inside `GITHUB_WORKSPACE`.             |
+| paths           | False    | `''`      | pack   | Newline-separated list of files and directories under `path` to pack. Empty means everything under `path`. Each entry has the same grammar as `path`.               |
+| destination     | False    |           | unpack | Directory to extract into. Same grammar as `path`. Required in `unpack` mode.                                                                                       |
+| expected-digest | False    | `''`      | unpack | SHA-256 (64 lower-case hex) of the manifest. When set, the action extracts nothing unless the downloaded manifest hashes to it.                                     |
+| retention-days  | False    | `'1'`     | pack   | Integer from 1 to 90, passed to the upload.                                                                                                                         |
+| fail-on-empty   | False    | `'true'`  | pack   | Strict boolean. Fail when nothing matched `paths`.                                                                                                                  |
+| overwrite       | False    | `'false'` | pack   | Strict boolean. Replace an artefact of the same name in this run.                                                                                                   |
+
+<!-- markdownlint-enable MD013 -->
+
+Strict booleans accept `true` or `false` and nothing else. An input
+that belongs to the other mode fails validation unless it keeps its
+default value. `path` and `destination` must resolve inside the
+workspace. Every part of the path below the workspace that already
+exists, the target included, must be a directory and not a symlink.
+The workspace's own path may pass through a symlink.
+
+## Outputs
+
+<!-- markdownlint-disable MD013 -->
+
+| Name          | Modes  | Description                                   |
+| ------------- | ------ | --------------------------------------------- |
+| artifact-id   | pack   | The ID `actions/upload-artifact` returned.    |
+| artifact-name | both   | The name used or verified.                    |
+| digest        | both   | SHA-256 of the manifest.                      |
+| file-count    | both   | Files packed, or files extracted.             |
+| destination   | unpack | Absolute path of the extraction root.         |
+
+<!-- markdownlint-enable MD013 -->
+
+## Modes
+
+### Pack
 
 `pack` writes the selected entries under `path` to
 `build-artifact.tar`, writes the [manifest](#manifest) beside it, and
@@ -135,49 +198,47 @@ of transfer, and zipping it again costs time on large trees.
   same tree under the same names get the same `digest`; a re-run or
   another run does not. `digest` pins one run's artefact, not the
   tree alone.
+- **Size.** `pack` streams each file into the tar in chunks, hashing
+  it on the way, and never holds a whole file in memory. Trees of
+  hundreds of MB are acceptable; the runner's disk, which holds the
+  tree and the tar at once, is the practical limit. Pack the output
+  a consumer needs, not the whole workspace.
+- **Retention.** `retention-days` defaults to `1`. The artefact is a
+  hand-off between jobs of one run, not a release asset; raise it
+  when a consumer job may run, or be re-run, later than a day after
+  the producer.
 
 The step summary lists the artefact's name, file count, total bytes
 and digest.
 
-## Inputs
+### Unpack
 
-<!-- markdownlint-disable MD013 -->
+`unpack` downloads the artefact of this run, never another, into a
+fresh scratch directory under `RUNNER_TEMP`, outside the workspace. It
+extracts nothing until the download holds the tar, its manifest and
+nothing else, the manifest names `artifact-name` and this run's ID,
+hashes to `expected-digest` when given, and matches the tar.
 
-| Name            | Required | Default   | Modes  | Description                                                                                                                                                         |
-| --------------- | -------- | --------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| mode            | True     |           | both   | `pack` or `unpack`. Anything else fails.                                                                                                                            |
-| artifact-name   | True     |           | both   | Name of the workflow artefact. Must match `^[A-Za-z0-9._-]+$`.                                                                                                      |
-| artifact-id     | False    | `''`      | unpack | Numeric artefact ID from a producer's `artifact-id` output. When set, the action downloads by ID and checks `artifact-name` against the downloaded artefact's name. |
-| path            | False    | `'.'`     | pack   | Directory the packed paths are relative to. `.` or relative segments of `[A-Za-z0-9._-]`, with no `..` segment. Must resolve inside `GITHUB_WORKSPACE`.             |
-| paths           | False    | `''`      | pack   | Newline-separated list of files and directories under `path` to pack. Empty means everything under `path`. Each entry has the same grammar as `path`.               |
-| destination     | False    |           | unpack | Directory to extract into. Same grammar as `path`. Required in `unpack` mode.                                                                                       |
-| expected-digest | False    | `''`      | unpack | SHA-256 (64 lower-case hex) of the manifest. When set, the action extracts nothing unless the downloaded manifest hashes to it.                                     |
-| retention-days  | False    | `'1'`     | pack   | Integer from 1 to 90, passed to the upload.                                                                                                                         |
-| fail-on-empty   | False    | `'true'`  | pack   | Strict boolean. Fail when nothing matched `paths`.                                                                                                                  |
-| overwrite       | False    | `'false'` | pack   | Strict boolean. Replace an artefact of the same name in this run.                                                                                                   |
+- **Destination.** `unpack` creates `destination` itself. An existing
+  `destination`, even an empty directory, or a symlink above it fails
+  the step.
+- **Pre-scan.** It checks every tar member before extracting any, and
+  refuses the whole artefact on the first member that breaks a rule
+  in [Trust model](#trust-model).
+- **Extraction.** It extracts with Python's `tarfile` `data` filter,
+  never `tar(1)`. Symlink targets keep their stored spelling,
+  `./bin/run.sh` included. Regular files keep their permission bits
+  within `0777`: a tar member whose mode differs from the manifest
+  fails the step, and `unpack` drops any setuid, setgid or sticky bit
+  the manifest records. Directories get their tar modes back within
+  `0777` too, once `unpack` has checked the tree.
+- **Verification.** The extracted tree must match the manifest file
+  for file.
+- **Cleanup.** On any failure after extraction began, the step removes
+  `destination` before failing, so a later step never reads a partial
+  tree.
 
-<!-- markdownlint-enable MD013 -->
-
-Strict booleans accept `true` or `false` and nothing else. An input
-that belongs to the other mode fails validation unless it keeps its
-default value. `path` and `destination` must resolve inside the
-workspace. Every part of the path below the workspace that already
-exists, the target included, must be a directory and not a symlink.
-The workspace's own path may pass through a symlink.
-
-## Outputs
-
-<!-- markdownlint-disable MD013 -->
-
-| Name          | Modes  | Description                                   |
-| ------------- | ------ | --------------------------------------------- |
-| artifact-id   | pack   | The ID `actions/upload-artifact` returned.    |
-| artifact-name | both   | The name used or verified.                    |
-| digest        | both   | SHA-256 of the manifest.                      |
-| file-count    | both   | Files packed, or files extracted.             |
-| destination   | unpack | Absolute path of the extraction root.         |
-
-<!-- markdownlint-enable MD013 -->
+Nothing in the artefact runs.
 
 ## Manifest
 
@@ -236,6 +297,82 @@ trailing newline, so the same content always gives the same digest:
   extracted tree with a missing, changed or unlisted file, a listed
   file reached through a symlinked directory, or a root that is not a
   real directory.
+
+### Recording what a lane handled
+
+The `digest` output pins one artefact, so a lane can record
+it as the identity of what it built and passed on. The
+`java-workflows` stage lane runs `build → sign → stage/central →
+attest → record`, packing and unpacking at each edge. Its `record`
+job stores the manifest, and so its digest, as the stage record: the
+list of files, with their hashes, that the lane signed and staged, and
+the run and commit that produced them.
+
+`unpack` restores the packed tree alone; the manifest stays in its
+private download directory and is not an output. A job that records
+the manifest downloads the artefact by ID itself, checks that
+`build-artifact.manifest.json` hashes to the producer's `digest`, and
+stores that file unchanged.
+
+## Trust model
+
+The producer job runs the project's code, so `unpack` treats the
+artefact as hostile data: a build may have written anything into it.
+The consumer may hold a credential, so a malicious artefact must not
+be able to write outside `destination`, run code, or pass itself off
+as another artefact.
+
+Before extracting any member, `unpack` fails the step on absolute
+paths, `..` segments and paths nested more than 256 levels deep. It
+refuses devices and FIFOs, and hard links to anything but an earlier
+regular member or with a mode other than that member's. It refuses
+symlinks whose target leaves the root or has a `..` after a named
+segment, members written through an earlier symlink, and members the
+manifest does not list. Setuid, setgid and sticky bits never survive
+extraction. An artefact from another run, or one that does not hash
+to `expected-digest`, never reaches extraction, and a failed
+extraction leaves no partial tree behind.
+
+On the producer side, `pack` guards against leaking the checkout's
+credential: it never packs `.git`, and refuses to run while
+`path/.git/config` holds the `extraheader` that `actions/checkout`
+leaves behind without `persist-credentials: false`.
+
+With `artifact-id`, `actions/download-artifact` reports no trusted name
+for the artefact without a token, which `unpack` does not take. The
+name is then informational: `unpack` compares `artifact-name` with the
+name the manifest records as a consistency check, and a producer
+could write any name there. What binds the content on that path is the
+immutable ID the producer's upload returned, the manifest's run ID
+matching this run, and `expected-digest`; pass `expected-digest` to
+bind the content you unpack to the manifest the producer emitted.
+
+By design, the action does not offer:
+
+- **Cross-run downloads.** `unpack` reads artefacts of the current run,
+  and refuses a manifest that records another run ID.
+- **A `github-token` input.** Downloads need no token within a run,
+  and the action takes none, so it cannot leak one.
+- **Docker image archives.** It packs a directory tree. Hand images
+  over through a registry or a dedicated image workflow.
+- **Pattern fan-in.** Each call packs or unpacks one named artefact;
+  no glob merges two or more artefacts into one tree.
+
+## Testing
+
+The unit tests need nothing beyond the Python standard library. From
+the repository root, run:
+
+```bash
+python3 -m unittest discover -s tests
+```
+
+`tests/test_readme.py` fails when the [Inputs](#inputs) or
+[Outputs](#outputs) table drifts from `action.yaml`.
+[`testing.yaml`](.github/workflows/testing.yaml) is the reference
+workflow: it runs the unit tests, then packs the checkout twice to
+check the outputs and that the digest is reproducible, and checks that
+an invalid `mode` fails validation.
 
 [pre-commit.ci results page]: https://results.pre-commit.ci/latest/github/lfreleng-actions/build-artifact-action/main
 [pre-commit.ci status badge]: https://results.pre-commit.ci/badge/github/lfreleng-actions/build-artifact-action/main.svg
