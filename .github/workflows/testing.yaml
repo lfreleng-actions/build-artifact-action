@@ -2,7 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
-# Action test/validation workflow
+# Action self-test: packs a fixture tree, unpacks it by artefact ID and
+# by name in other jobs, and proves the refusal cases fail for the
+# reason they must. The unit tests under tests/ cover the scripts
+# offline; this covers the real artefact round trip between jobs.
 name: "Test GitHub Action 🧪"
 
 # yamllint disable-line rule:truthy
@@ -20,13 +23,18 @@ concurrency:
 permissions: {}
 
 jobs:
-  ### Test the GitHub Action in this Repository ###
-  tests:
-    name: "Test local GitHub Action"
+  ### Pack a fixture tree for the consumer jobs ###
+  produce:
+    name: "Produce"
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    timeout-minutes: 10 # Increase this timeout value as needed
+    timeout-minutes: 10
+    outputs:
+      artifact-id: ${{ steps.repack.outputs.artifact-id }}
+      artifact-name: ${{ steps.repack.outputs.artifact-name }}
+      digest: ${{ steps.repack.outputs.digest }}
+      file-count: ${{ steps.repack.outputs.file-count }}
     steps:
       # Load the egress allow-list out-of-band from the
       # organisation's .github repository and publish it as
@@ -50,34 +58,55 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: "Run unit tests"
+      # The 20 MB file makes the tar large enough to stream.
+      - name: "Build fixture tree"
         shell: bash
         run: |
-          # Run unit tests
-          python3 -m unittest discover -s tests
+          # Build fixture tree
+          mkdir -p fixture/nested/deeper
+          printf '#!/bin/sh\necho "self-test"\n' > fixture/run.sh
+          chmod 0755 fixture/run.sh
+          printf 'plain\n' > fixture/plain.txt
+          chmod 0644 fixture/plain.txt
+          printf 'nested\n' > fixture/nested/deeper/file.txt
+          ln -s ../plain.txt fixture/nested/plain-link
+          printf 'utf-8\n' > 'fixture/nested/café-名前.txt'
+          head -c 20971520 /dev/urandom > fixture/large.bin
 
-      # Pack the checkout twice under one name: the second run replaces
-      # the first, and the same tree must give the same digest.
+      - name: "Record expected tree"
+        shell: bash
+        run: |
+          # Record expected tree
+          mkdir "$RUNNER_TEMP/expected"
+          bash .github/self-test/tree.sh fixture \
+            > "$RUNNER_TEMP/expected/expected.txt"
+          cat "$RUNNER_TEMP/expected/expected.txt"
+
+      # Pack the fixture twice under one name: the second run replaces
+      # the first, and the same tree must give the same digest. The
+      # first sets overwrite too, so re-running this job succeeds.
       - name: "Running local action: ${{ github.repository }} [pack]"
         uses: $/
         id: pack
         with:
           mode: "pack"
-          artifact-name: "test-artifact"
-          path: "."
+          artifact-name: "self-test-${{ github.run_id }}"
+          path: "fixture"
+          overwrite: "true"
 
       - name: "Running local action: ${{ github.repository }} [repack]"
         uses: $/
         id: repack
         with:
           mode: "pack"
-          artifact-name: "test-artifact"
-          path: "."
+          artifact-name: "self-test-${{ github.run_id }}"
+          path: "fixture"
           overwrite: "true"
 
       - name: "Error if pack outputs are wrong"
         shell: bash
         env:
+          EXPECTED_NAME: "self-test-${{ github.run_id }}"
           ARTIFACT_ID: ${{ steps.pack.outputs.artifact-id }}
           ARTIFACT_NAME: ${{ steps.pack.outputs.artifact-name }}
           DIGEST: ${{ steps.pack.outputs.digest }}
@@ -91,7 +120,7 @@ jobs:
             echo "Error: pack did not return an artifact-id ❌"
             exit 1
           fi
-          if [ "$ARTIFACT_NAME" != "test-artifact" ]; then
+          if [ "$ARTIFACT_NAME" != "$EXPECTED_NAME" ]; then
             echo "Error: unexpected artifact-name '$ARTIFACT_NAME' ❌"
             exit 1
           fi
@@ -110,22 +139,439 @@ jobs:
           echo "Packed $FILE_COUNT files reproducibly ✅"
           echo "Packed $FILE_COUNT files ✅" >> "$GITHUB_STEP_SUMMARY"
 
+      - name: "Upload expected tree"
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: "self-test-expected-${{ github.run_id }}"
+          path: ${{ runner.temp }}/expected/expected.txt
+          retention-days: 1
+          overwrite: true
+          if-no-files-found: error
+
+  ### Unpack the fixture by artefact ID ###
+  consume-by-id:
+    name: "Consume by ID"
+    needs: produce
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
+        with:
+          config: '@56d70f0eae78f334a598d1ffe071d4b821517b22'  # v0.17.1
+
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: "Checkout repository"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Download expected tree"
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: "self-test-expected-${{ github.run_id }}"
+          path: ${{ runner.temp }}/expected
+
+      - name: "Running local action: ${{ github.repository }} [unpack]"
+        uses: $/
+        id: unpack
+        with:
+          mode: "unpack"
+          artifact-id: ${{ needs.produce.outputs.artifact-id }}
+          artifact-name: ${{ needs.produce.outputs.artifact-name }}
+          expected-digest: ${{ needs.produce.outputs.digest }}
+          destination: "restored"
+
+      - name: "Error if restored tree is wrong"
+        shell: bash
+        env:
+          DESTINATION: ${{ steps.unpack.outputs.destination }}
+          DIGEST: ${{ steps.unpack.outputs.digest }}
+          FILE_COUNT: ${{ steps.unpack.outputs.file-count }}
+          EXPECTED_DIGEST: ${{ needs.produce.outputs.digest }}
+          EXPECTED_COUNT: ${{ needs.produce.outputs.file-count }}
+        run: |
+          # Error if restored tree is wrong
+          bash .github/self-test/check-restored.sh
+
+  ### Unpack the fixture by artefact name ###
+  consume-by-name:
+    name: "Consume by name"
+    needs: produce
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
+        with:
+          config: '@56d70f0eae78f334a598d1ffe071d4b821517b22'  # v0.17.1
+
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: "Checkout repository"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Download expected tree"
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: "self-test-expected-${{ github.run_id }}"
+          path: ${{ runner.temp }}/expected
+
+      - name: "Running local action: ${{ github.repository }} [unpack]"
+        uses: $/
+        id: unpack
+        with:
+          mode: "unpack"
+          artifact-name: ${{ needs.produce.outputs.artifact-name }}
+          expected-digest: ${{ needs.produce.outputs.digest }}
+          destination: "restored"
+
+      - name: "Error if restored tree is wrong"
+        shell: bash
+        env:
+          DESTINATION: ${{ steps.unpack.outputs.destination }}
+          DIGEST: ${{ steps.unpack.outputs.digest }}
+          FILE_COUNT: ${{ steps.unpack.outputs.file-count }}
+          EXPECTED_DIGEST: ${{ needs.produce.outputs.digest }}
+          EXPECTED_COUNT: ${{ needs.produce.outputs.file-count }}
+        run: |
+          # Error if restored tree is wrong
+          bash .github/self-test/check-restored.sh
+
+  ### Inputs and artefacts the action must refuse ###
+  # Each case asserts the failure and its cause: probe.py reruns the
+  # action's scripts on the same inputs and checks the '::error::' line,
+  # which a composite action's caller cannot read.
+  refuse:
+    name: "Refuse ${{ matrix.case }}"
+    needs: produce
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - case: "invalid-mode"
+            mode: "invalid"
+            name: "refuse-invalid-mode"
+            expect: "mode: must be 'pack' or 'unpack'"
+          - case: "destination-exists"
+            mode: "unpack"
+            source: "produce"
+            name: "self-test"
+            setup: "exists"
+            destination: "already-there"
+            # yamllint disable-line rule:line-length
+            expect: "destination: 'already-there' must not exist; unpack creates it"
+          - case: "destination-symlink"
+            mode: "unpack"
+            source: "produce"
+            name: "self-test"
+            setup: "symlink"
+            destination: "evil/x"
+            # yamllint disable-line rule:line-length
+            expect: "destination: must resolve inside GITHUB_WORKSPACE with no symlink"
+          - case: "zero-digest"
+            mode: "unpack"
+            source: "produce"
+            name: "self-test"
+            destination: "zero-digest"
+            # yamllint disable-line rule:line-length
+            expected-digest: "0000000000000000000000000000000000000000000000000000000000000000"
+            expect: "expected-digest: manifest SHA-256"
+          - case: "wrong-name"
+            mode: "unpack"
+            source: "produce"
+            name: "not-self-test"
+            destination: "wrong-name"
+            expect: "artifact_name: manifest names 'self-test-"
+          - case: "hostile-absolute"
+            mode: "unpack"
+            source: "hostile"
+            name: "hostile-absolute"
+            setup: "hostile"
+            member: "/tmp/build-artifact-escape"
+            destination: "hostile/out"
+            expect: "is absolute"
+          - case: "hostile-parent"
+            mode: "unpack"
+            source: "hostile"
+            name: "hostile-parent"
+            setup: "hostile"
+            member: "../build-artifact-escape"
+            destination: "hostile/out"
+            expect: "contains a '..' segment"
+          - case: "pack-outside"
+            mode: "pack"
+            name: "refuse-pack-outside"
+            paths: "../outside"
+            expect: "paths: line 1 must be"
+          - case: "pack-extraheader"
+            mode: "pack"
+            name: "refuse-pack-extraheader"
+            setup: "extraheader"
+            path: "scratch-clone"
+            expect: "holds an http extraheader credential"
+    env:
+      ARTIFACT_NAME: "${{ matrix.name }}-${{ github.run_id }}"
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
+        with:
+          config: '@56d70f0eae78f334a598d1ffe071d4b821517b22'  # v0.17.1
+
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: "Checkout repository"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The extraheader case writes a placeholder, not a credential, to
+      # a scratch clone: if the refusal ever regressed, a real token
+      # would have no place in the test.
+      - name: "Prepare case"
+        shell: bash
+        env:
+          SETUP: ${{ matrix.setup }}
+          MEMBER: ${{ matrix.member }}
+        run: |
+          # Prepare case
+          case "$SETUP" in
+            exists) mkdir already-there ;;
+            symlink) ln -s /tmp evil ;;
+            hostile)
+              python3 -I -B .github/self-test/hostile.py \
+                "$RUNNER_TEMP/hostile" "$ARTIFACT_NAME" \
+                "$MEMBER-$GITHUB_RUN_ID"
+              ;;
+            extraheader)
+              git clone --quiet . scratch-clone
+              git -C scratch-clone config \
+                http.https://github.com/.extraheader \
+                "AUTHORIZATION: placeholder-not-a-credential"
+              ;;
+          esac
+
+      - name: "Upload hostile artefact"
+        id: hostile
+        if: matrix.source == 'hostile'
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: |
+            ${{ runner.temp }}/hostile/build-artifact.tar
+            ${{ runner.temp }}/hostile/build-artifact.manifest.json
+          retention-days: 1
+          overwrite: true
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: "Download artefact for the probe"
+        if: matrix.source == 'produce'
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.produce.outputs.artifact-id }}
+          path: ${{ runner.temp }}/probe-download
+
+      # Compile the scripts now, so the action's own imports write no
+      # bytecode into the workspace after the marker.
+      - name: "Mark the workspace"
+        shell: bash
+        run: |
+          # Mark the workspace
+          python3 -m compileall -q scripts
+          touch "$RUNNER_TEMP/marker"
+
+      - name: "Check the refusal cause"
+        shell: bash
+        env:
+          INPUT_MODE: ${{ matrix.mode }}
+          INPUT_ARTIFACT_NAME: ${{ env.ARTIFACT_NAME }}
+          # yamllint disable-line rule:line-length
+          INPUT_ARTIFACT_ID: ${{ matrix.source == 'hostile' && steps.hostile.outputs.artifact-id || matrix.source == 'produce' && needs.produce.outputs.artifact-id || '' }}
+          INPUT_PATH: ${{ matrix.path || '.' }}
+          INPUT_PATHS: ${{ matrix.paths }}
+          INPUT_DESTINATION: ${{ matrix.destination }}
+          INPUT_EXPECTED_DIGEST: ${{ matrix.expected-digest }}
+          SOURCE: ${{ matrix.source }}
+          EXPECT_ERROR: ${{ matrix.expect }}
+        run: |
+          # Check the refusal cause
+          case "$SOURCE" in
+            produce) DOWNLOAD_DIR="$RUNNER_TEMP/probe-download" ;;
+            hostile) DOWNLOAD_DIR="$RUNNER_TEMP/hostile" ;;
+            *) DOWNLOAD_DIR="" ;;
+          esac
+          export DOWNLOAD_DIR
+          python3 -I -B .github/self-test/probe.py
+
       # yamllint disable-line rule:line-length
       - name: "Running local action: ${{ github.repository }} [Override Failure]"
         uses: $/
-        id: failure
+        id: attempt
         continue-on-error: true
         with:
-          mode: "invalid"
-          artifact-name: "test-artifact"
+          mode: ${{ matrix.mode }}
+          artifact-name: ${{ env.ARTIFACT_NAME }}
+          # yamllint disable-line rule:line-length
+          artifact-id: ${{ matrix.source == 'hostile' && steps.hostile.outputs.artifact-id || matrix.source == 'produce' && needs.produce.outputs.artifact-id || '' }}
+          path: ${{ matrix.path || '.' }}
+          paths: ${{ matrix.paths }}
+          destination: ${{ matrix.destination }}
+          expected-digest: ${{ matrix.expected-digest }}
 
       # Failure testing is also important
-      - name: "Error if step above did NOT fail validation"
-        if: >-
-          steps.failure.outcome == 'success' ||
-          steps.failure.outputs.artifact-name != ''
+      - name: "Error if step above did NOT fail safely"
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.attempt.outcome }}
+          SETUP: ${{ matrix.setup }}
+          MEMBER: ${{ matrix.member }}
+          DESTINATION: ${{ matrix.destination }}
+        run: |
+          # Error if step above did NOT fail safely
+          if [ "$OUTCOME" != "failure" ]; then
+            echo "Error: previous test step did NOT fail ($OUTCOME) ❌"
+            exit 1
+          fi
+          written="$(find "$GITHUB_WORKSPACE" -mindepth 1 \
+            -newer "$RUNNER_TEMP/marker" -print)"
+          if [ -n "$written" ]; then
+            echo "Error: the refused step wrote to the workspace ❌"
+            echo "$written"
+            exit 1
+          fi
+          if [ "$SETUP" = "exists" ]; then
+            if [ -L "$DESTINATION" ] || [ ! -d "$DESTINATION" ]; then
+              echo "Error: the existing destination was removed or replaced ❌"
+              exit 1
+            fi
+            if [ -n "$(ls -A "$DESTINATION")" ]; then
+              echo "Error: the existing destination gained entries ❌"
+              exit 1
+            fi
+          elif [ -n "$DESTINATION" ] &&
+            { [ -e "$DESTINATION" ] || [ -L "$DESTINATION" ]; }; then
+            echo "Error: destination '$DESTINATION' was created ❌"
+            exit 1
+          fi
+          if [ -n "$MEMBER" ] && [ -e "$MEMBER-$GITHUB_RUN_ID" ]; then
+            echo "Error: the hostile member escaped the destination ❌"
+            exit 1
+          fi
+          echo "Refused safely ✅"
+
+  ### Unit tests, as run here and as the action runs its scripts ###
+  unit:
+    name: "Unit tests"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
+        with:
+          config: '@56d70f0eae78f334a598d1ffe071d4b821517b22'  # v0.17.1
+
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: "Checkout repository"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Run unit tests"
         shell: bash
         run: |
-          # Error if step above did NOT fail validation
-          echo "Error: previous test step did NOT fail validation ❌"
-          exit 1
+          # Run unit tests
+          python3 -m unittest discover -s tests
+
+      # 'python3 -I -m unittest' leaves the checkout off sys.path, so
+      # the tests could not import scripts/; put it back by hand.
+      - name: "Run unit tests in isolated mode"
+        shell: bash
+        run: |
+          # Run unit tests in isolated mode
+          python3 -I -c 'import sys, unittest
+          sys.path.insert(0, ".")
+          unittest.main(
+              module=None,
+              argv=["python3 -I -m unittest", "discover", "-s", "tests"],
+          )'
+
+  ### The single check branch protection requires ###
+  verdict:
+    name: "Verdict"
+    if: always()
+    needs: [produce, consume-by-id, consume-by-name, refuse, unit]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
+        with:
+          config: '@56d70f0eae78f334a598d1ffe071d4b821517b22'  # v0.17.1
+
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: "Error if any self-test job did not succeed"
+        shell: bash
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          # Error if any self-test job did not succeed
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<< "$NEEDS"
+          if ! jq -e 'all(.[]; .result == "success")' <<< "$NEEDS" \
+            > /dev/null; then
+            echo "Error: a self-test job did not succeed ❌"
+            exit 1
+          fi
+          echo "Every self-test job succeeded ✅"
