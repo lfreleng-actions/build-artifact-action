@@ -42,8 +42,8 @@ from scripts.tarball import (
     check_root_dir,
     write_tar,
 )
-from scripts.unpack import MAX_DEPTH
 from scripts.unpack_links import check_link_target
+from scripts.unpack_members import MAX_DEPTH
 from scripts.validate import inside, write_outputs
 
 TAR_NAME = "build-artifact.tar"

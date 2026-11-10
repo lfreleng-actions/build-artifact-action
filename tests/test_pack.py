@@ -24,7 +24,7 @@ from scripts.manifest import ManifestError, load, verify_tar, verify_tree
 from scripts.manifest_schema import FileEntry, RegularEntry
 from scripts.pack import as_packed, members_of, run
 from scripts.tarball import Member, check_members, check_root_dir, write_tar
-from scripts.unpack import MAX_DEPTH, scan_members
+from scripts.unpack_members import MAX_DEPTH, scan_members
 
 PACK = Path(__file__).resolve().parent.parent / "scripts" / "pack.py"
 UNPACK = PACK.parent / "unpack.py"

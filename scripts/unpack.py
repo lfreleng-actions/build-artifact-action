@@ -21,14 +21,11 @@ from __future__ import annotations
 
 import copy
 import os
-import posixpath
-import shutil
 import stat
 import sys
 import tarfile
 import warnings
 from collections.abc import Mapping
-from typing import cast
 
 # python3 -I leaves the action's own root off sys.path.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
@@ -41,27 +38,24 @@ from scripts.manifest import (
     verify_tar,
     verify_tree,
 )
-from scripts.manifest_schema import (
-    RegularEntry,
-    escape_annotation,
-    fail,
-    path_problem,
+from scripts.manifest_schema import escape_annotation, fail
+from scripts.unpack_destination import (
+    create_destination,
+    plan_destination,
+    remove_created,
 )
-from scripts.unpack_links import check_link_target, restore_link_targets
+from scripts.unpack_links import restore_link_targets
+from scripts.unpack_members import match_manifest, scan_members
 from scripts.unpack_modes import (
     as_restored,
     drop_owner_read,
-    open_up,
     restore_dir_modes,
     restore_modes,
 )
-from scripts.validate import PATH_RULE, inside, path_grammar_ok, write_outputs
+from scripts.validate import inside, write_outputs
 
 TAR_NAME = "build-artifact.tar"
 MANIFEST_NAME = "build-artifact.manifest.json"
-# Verifying and removing a tree recurse once per directory level, so a
-# bound far inside Python's recursion limit keeps both from failing.
-MAX_DEPTH = 256
 
 
 def require(env: Mapping[str, str], key: str) -> str:
@@ -70,81 +64,6 @@ def require(env: Mapping[str, str], key: str) -> str:
     if not value:
         fail(f"{key}: must be set")
     return value
-
-
-def plan_destination(workspace: str, value: str) -> tuple[str, list[str]]:
-    """Return the absolute destination and its missing ancestors, in order.
-
-    workspace is already canonical. Every existing component below it
-    must be a real directory, never a symlink, and the destination
-    itself must not exist: only a newly created root guarantees that no
-    pre-existing link beneath it can redirect a write.
-    """
-    if not path_grammar_ok(value):
-        fail(f"destination: {PATH_RULE}")
-    # The grammar admits '.' segments, which would otherwise survive into
-    # the paths created and checked below.
-    value = posixpath.normpath(value)
-    if value == ".":
-        fail("destination: must not exist; '.' is the workspace itself")
-    segments = value.split("/")
-    current = workspace
-    missing: list[str] = []
-    for depth, segment in enumerate(segments[:-1], start=1):
-        current = os.path.join(current, segment)
-        if missing:
-            missing.append(current)
-            continue
-        try:
-            mode = os.lstat(current).st_mode
-        except FileNotFoundError:
-            missing.append(current)
-            continue
-        except OSError as error:
-            fail(f"destination: cannot stat {current}: {error.strerror}")
-        ancestor = "/".join(segments[:depth])
-        if stat.S_ISLNK(mode):
-            fail(f"destination: ancestor {ancestor!r} is a symlink")
-        if not stat.S_ISDIR(mode):
-            fail(f"destination: ancestor {ancestor!r} is not a directory")
-    final = os.path.join(current, segments[-1])
-    if not missing and os.path.lexists(final):
-        fail(f"destination: {value!r} must not exist; unpack creates it")
-    return final, missing
-
-
-def create_destination(
-    workspace: str, final: str, missing: list[str], created: list[str]
-) -> None:
-    """Create each missing ancestor, then final, recording each in created."""
-    for path in [*missing, final]:
-        try:
-            os.mkdir(path)
-        except FileExistsError:
-            fail(f"destination: {path} must not exist; unpack creates it")
-        except OSError as error:
-            fail(f"destination: cannot create {path}: {error.strerror}")
-        created.append(path)
-    if os.path.realpath(final) != final or not inside(final, workspace):
-        fail(f"destination: {final} does not resolve inside the workspace")
-
-
-def remove_created(created: list[str]) -> list[str]:
-    """Remove what create_destination made: the tree, then empty parents.
-
-    Returns an error message for each path left behind.
-    """
-    problems: list[str] = []
-    for path in reversed(created):
-        try:
-            if path == created[-1]:
-                open_up(path)
-                shutil.rmtree(path)
-            else:
-                os.rmdir(path)
-        except OSError as error:
-            problems.append(f"cannot remove {path}: {error.strerror}")
-    return problems
 
 
 def check_download(directory: str) -> tuple[str, str]:
@@ -187,96 +106,6 @@ def verify_download(
         fail(f"tar.path: must be {TAR_NAME}")
     verify_tar(manifest, tar_path)
     return manifest, digest
-
-
-def check_parents(name: str, kinds: Mapping[str, str]) -> None:
-    """Fail when a parent of name is an earlier symlink or file member."""
-    segments = name.split("/")
-    for depth in range(1, len(segments)):
-        parent = "/".join(segments[:depth])
-        kind = kinds.get(parent)
-        if kind == "symlink":
-            fail(f"tar member {name!r}: would be written through symlink {parent!r}")
-        if kind not in (None, "dir"):
-            fail(f"tar member {name!r}: lies below file member {parent!r}")
-
-
-def member_kind(
-    member: tarfile.TarInfo,
-    kinds: Mapping[str, str],
-    files: Mapping[str, tarfile.TarInfo],
-) -> str:
-    """Return the kind of member, failing on any type unpack refuses."""
-    name = member.name
-    if member.isdir():
-        return "dir"
-    if member.isreg():
-        return "file"
-    if member.islnk():
-        target = member.linkname
-        if kinds.get(target) != "file":
-            fail(f"tar member {name!r}: hard link {target!r} is not an earlier file")
-        # Both names share one inode, so they cannot keep different modes.
-        if member.mode & 0o7777 != files[target].mode & 0o7777:
-            fail(f"tar member {name!r}: hard link mode differs from {target!r}")
-        return "hardlink"
-    if member.issym():
-        check_link_target(name, member.linkname)
-        return "symlink"
-    if member.isdev():
-        fail(f"tar member {name!r}: device or FIFO member")
-    fail(f"tar member {name!r}: unsupported member type")
-
-
-def scan_members(members: list[tarfile.TarInfo]) -> dict[str, tarfile.TarInfo]:
-    """Fail on any unsafe member; return the non-directory members by name."""
-    kinds: dict[str, str] = {}
-    implied: set[str] = set()
-    files: dict[str, tarfile.TarInfo] = {}
-    for member in members:
-        name = member.name
-        problem = path_problem(name)
-        if problem is not None:
-            fail(f"tar member {name!r}: {problem}")
-        if name.count("/") >= MAX_DEPTH:
-            fail(f"tar member {name!r}: nested deeper than {MAX_DEPTH} levels")
-        if name in kinds:
-            fail(f"tar member {name!r}: appears more than once")
-        check_parents(name, kinds)
-        kind = member_kind(member, kinds, files)
-        if kind != "dir":
-            if name in implied:
-                fail(f"tar member {name!r}: replaces a directory")
-            files[name] = member
-        kinds[name] = kind
-        segments = name.split("/")
-        implied.update("/".join(segments[:depth]) for depth in range(1, len(segments)))
-    return files
-
-
-def match_manifest(manifest: Manifest, files: Mapping[str, tarfile.TarInfo]) -> None:
-    """Fail unless the tar's files and the manifest's entries are the same set."""
-    listed = {entry["path"]: entry for entry in manifest["files"]}
-    for name, member in files.items():
-        entry = listed.get(name)
-        if entry is None:
-            fail(f"tar member {name!r}: not listed in the manifest")
-        # mypy does not narrow a TypedDict union on 'in'; pyright does.
-        target = cast("Mapping[str, object]", entry).get("symlink")
-        if member.issym() != (target is not None) or (
-            member.issym() and member.linkname != target
-        ):
-            fail(f"tar member {name!r}: type or target does not match the manifest")
-        if member.issym():
-            continue
-        regular = cast("RegularEntry", entry)
-        if member.isreg() and member.size != regular["size"]:
-            fail(f"tar member {name!r}: size does not match the manifest")
-        if f"{member.mode & 0o7777:04o}" != regular["mode"]:
-            fail(f"tar member {name!r}: mode does not match the manifest")
-    missing = sorted(listed.keys() - files.keys())
-    if missing:
-        fail(f"{missing[0]}: listed in the manifest but missing from the tar")
 
 
 def has_data_filter() -> bool:

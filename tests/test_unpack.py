@@ -686,7 +686,7 @@ class AfterExtractionTest(UnpackTestCase):
     def test_extraction_value_error_removes_destination(self) -> None:
         self.nul_link_download()
         self.destination = "out/unpacked"
-        with mock.patch.object(unpack, "check_link_target"):
+        with mock.patch("scripts.unpack_members.check_link_target"):
             self.assert_refused("extraction failed")
         self.assertFalse(os.path.lexists(self.workspace / "out"))
 
