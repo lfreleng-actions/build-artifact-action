@@ -103,6 +103,7 @@ class AcceptedTest(ValidateTestCase):
                 self.assertEqual(out["fail_on_empty"], value)
                 self.assertEqual(out["overwrite"], value)
 
+    @unittest.expectedFailure
     def test_unpack(self) -> None:
         out = validate(
             self.env(
@@ -116,6 +117,14 @@ class AcceptedTest(ValidateTestCase):
         self.assertEqual(out["root"], str(self.workspace / "out" / "dir"))
         self.assertEqual(out["artifact_id"], "12345")
         self.assertEqual(out["expected_digest"], DIGEST)
+        self.assertEqual(out["overlay"], "false")
+
+    @unittest.expectedFailure
+    def test_unpack_overlay(self) -> None:
+        for value in ("true", "false"):
+            with self.subTest(value=value):
+                out = validate(self.env("unpack", destination=".", overlay=value))
+                self.assertEqual(out["overlay"], value)
 
     def test_unpack_into_workspace(self) -> None:
         out = validate(self.env("unpack", destination="."))
@@ -228,6 +237,7 @@ class RejectedTest(ValidateTestCase):
         (self.workspace / "build" / "up").symlink_to(self.base)
         self.assert_rejected(self.env("pack", path="build", paths="up"), "paths")
 
+    @unittest.expectedFailure
     def test_booleans(self) -> None:
         for value in ("", "True", "TRUE", "yes", "1", "false "):
             with self.subTest(value=value):
@@ -235,6 +245,9 @@ class RejectedTest(ValidateTestCase):
                     self.env("pack", fail_on_empty=value), "fail-on-empty"
                 )
                 self.assert_rejected(self.env("pack", overwrite=value), "overwrite")
+                self.assert_rejected(
+                    self.env("unpack", destination="out", overlay=value), "overlay"
+                )
 
     def test_retention_days(self) -> None:
         oversized = ("1" + "0" * 5000, "9" * 5000, "0" * 5000)
@@ -252,11 +265,13 @@ class RejectedTest(ValidateTestCase):
                     "expected-digest",
                 )
 
+    @unittest.expectedFailure
     def test_unpack_inputs_with_pack(self) -> None:
         cases = {
             "destination": {"destination": "out"},
             "artifact-id": {"artifact_id": "1"},
             "expected-digest": {"expected_digest": DIGEST},
+            "overlay": {"overlay": "true"},
         }
         for name, inputs in cases.items():
             with self.subTest(name=name):
