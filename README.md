@@ -478,7 +478,9 @@ python3 -m unittest discover -s tests
 [`testing.yaml`](.github/workflows/testing.yaml) is the reference
 workflow: it runs the unit tests, then packs the checkout twice to
 check the outputs and that the digest is reproducible, and checks that
-an invalid `mode` fails validation.
+an invalid `mode` fails validation. It also unpacks with `overlay`
+into a directory holding a file of its own, and checks that a
+colliding file fails the step.
 
 [pre-commit.ci results page]: https://results.pre-commit.ci/latest/github/lfreleng-actions/build-artifact-action/main
 [pre-commit.ci status badge]: https://results.pre-commit.ci/badge/github/lfreleng-actions/build-artifact-action/main.svg

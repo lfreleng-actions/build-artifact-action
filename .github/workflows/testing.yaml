@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
-# Action self-test: packs a fixture tree, unpacks it by artefact ID and
-# by name in other jobs, and proves the refusal cases fail for the
-# reason they must. The unit tests under tests/ cover the scripts
+# Action self-test: packs a fixture tree, unpacks it by artefact ID, by
+# name and with overlay in other jobs, and proves the refusal cases fail
+# for the reason they must. The unit tests under tests/ cover the scripts
 # offline; this covers the real artefact round trip between jobs.
 name: "Test GitHub Action 🧪"
 
@@ -260,6 +260,89 @@ jobs:
           # Error if restored tree is wrong
           bash .github/self-test/check-restored.sh
 
+  ### Add the fixture to an existing directory with overlay ###
+  consume-overlay:
+    name: "Consume with overlay"
+    needs: produce
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
+        with:
+          config: '@56d70f0eae78f334a598d1ffe071d4b821517b22'  # v0.17.1
+
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: "Checkout repository"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Download expected tree"
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: "self-test-expected-${{ github.run_id }}"
+          path: ${{ runner.temp }}/expected
+
+      - name: "Prepare existing directory"
+        shell: bash
+        run: |
+          # Prepare existing directory
+          mkdir -p overlay-target/nested
+          printf 'FROM scratch\n' > overlay-target/Dockerfile
+          printf 'mine\n' > overlay-target/nested/keep.txt
+          sha256sum overlay-target/Dockerfile overlay-target/nested/keep.txt \
+            > "$RUNNER_TEMP/existing.txt"
+
+      - name: "Running local action: ${{ github.repository }} [overlay]"
+        uses: $/
+        id: unpack
+        with:
+          mode: "unpack"
+          artifact-id: ${{ needs.produce.outputs.artifact-id }}
+          artifact-name: ${{ needs.produce.outputs.artifact-name }}
+          expected-digest: ${{ needs.produce.outputs.digest }}
+          destination: "overlay-target"
+          overlay: "true"
+
+      - name: "Error if overlay tree is wrong"
+        shell: bash
+        env:
+          DESTINATION: ${{ steps.unpack.outputs.destination }}
+          FILE_COUNT: ${{ steps.unpack.outputs.file-count }}
+          EXPECTED_COUNT: ${{ needs.produce.outputs.file-count }}
+        run: |
+          # Error if overlay tree is wrong
+          if [ "$DESTINATION" != "$(realpath overlay-target)" ]; then
+            echo "Error: destination '$DESTINATION' is not overlay-target ❌"
+            exit 1
+          fi
+          if ! sha256sum --check --quiet "$RUNNER_TEMP/existing.txt"; then
+            echo "Error: overlay changed a file that was already there ❌"
+            exit 1
+          fi
+          if ! grep -E '^[0-9a-f]{64}  ' "$RUNNER_TEMP/expected/expected.txt" |
+            (cd "$DESTINATION" && sha256sum --check --quiet -); then
+            echo "Error: overlay did not add the fixture's files intact ❌"
+            exit 1
+          fi
+          if [ "$FILE_COUNT" != "$EXPECTED_COUNT" ]; then
+            echo "Error: added $FILE_COUNT files, packed $EXPECTED_COUNT ❌"
+            exit 1
+          fi
+          echo "Added $FILE_COUNT files beside the existing ones ✅"
+          echo "Overlay added $FILE_COUNT files ✅" >> "$GITHUB_STEP_SUMMARY"
+
   ### Inputs and artefacts the action must refuse ###
   # Each case asserts the failure and its cause: probe.py reruns the
   # action's scripts on the same inputs and checks the '::error::' line,
@@ -295,6 +378,21 @@ jobs:
             destination: "evil/x"
             # yamllint disable-line rule:line-length
             expect: "destination: must resolve inside GITHUB_WORKSPACE with no symlink"
+          - case: "overlay-collision"
+            mode: "unpack"
+            source: "produce"
+            name: "self-test"
+            setup: "overlay-collision"
+            destination: "overlay-target"
+            overlay: "true"
+            expect: "would replace existing file 'plain.txt'"
+          - case: "overlay-missing"
+            mode: "unpack"
+            source: "produce"
+            name: "self-test"
+            destination: "not-there"
+            overlay: "true"
+            expect: "must already exist with overlay"
           - case: "zero-digest"
             mode: "unpack"
             source: "produce"
@@ -369,6 +467,10 @@ jobs:
           # Prepare case
           case "$SETUP" in
             exists) mkdir already-there ;;
+            overlay-collision)
+              mkdir overlay-target
+              printf 'mine\n' > overlay-target/plain.txt
+              ;;
             symlink) ln -s /tmp evil ;;
             hostile)
               python3 -I -B .github/self-test/hostile.py \
@@ -426,6 +528,7 @@ jobs:
           INPUT_PATHS: ${{ matrix.paths }}
           INPUT_DESTINATION: ${{ matrix.destination }}
           INPUT_EXPECTED_DIGEST: ${{ matrix.expected-digest }}
+          INPUT_OVERLAY: ${{ matrix.overlay || 'false' }}
           SOURCE: ${{ matrix.source }}
           EXPECT_ERROR: ${{ matrix.expect }}
         run: |
@@ -452,6 +555,7 @@ jobs:
           paths: ${{ matrix.paths }}
           destination: ${{ matrix.destination }}
           expected-digest: ${{ matrix.expected-digest }}
+          overlay: ${{ matrix.overlay || 'false' }}
 
       # Failure testing is also important
       - name: "Error if step above did NOT fail safely"
@@ -481,6 +585,12 @@ jobs:
             fi
             if [ -n "$(ls -A "$DESTINATION")" ]; then
               echo "Error: the existing destination gained entries ❌"
+              exit 1
+            fi
+          elif [ "$SETUP" = "overlay-collision" ]; then
+            if [ "$(ls -A "$DESTINATION")" != "plain.txt" ] ||
+              [ "$(cat "$DESTINATION/plain.txt")" != "mine" ]; then
+              echo "Error: the refused overlay changed the destination ❌"
               exit 1
             fi
           elif [ -n "$DESTINATION" ] &&
@@ -543,7 +653,13 @@ jobs:
   verdict:
     name: "Verdict"
     if: always()
-    needs: [produce, consume-by-id, consume-by-name, refuse, unit]
+    needs:
+      - produce
+      - consume-by-id
+      - consume-by-name
+      - consume-overlay
+      - refuse
+      - unit
     runs-on: ubuntu-latest
     permissions:
       contents: read
