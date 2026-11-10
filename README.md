@@ -116,6 +116,7 @@ and no token, and refuses a manifest that records another run.
 | path            | False    | `'.'`     | pack   | Directory the packed paths are relative to. `.` or relative segments of `[A-Za-z0-9._-]`, with no `..` segment. Must resolve inside `GITHUB_WORKSPACE`.             |
 | paths           | False    | `''`      | pack   | Newline-separated list of files and directories under `path` to pack. Empty means everything under `path`. Each entry has the same grammar as `path`.               |
 | destination     | False    |           | unpack | Directory to extract into. Same grammar as `path`. Required in `unpack` mode.                                                                                       |
+| overlay         | False    | `'false'` | unpack | Strict boolean. Add the files to an existing `destination`, replacing nothing, instead of creating it; see [Overlay](#adding-files-to-an-existing-directory).       |
 | expected-digest | False    | `''`      | unpack | SHA-256 (64 lower-case hex) of the manifest. When set, the action extracts nothing unless the downloaded manifest hashes to it.                                     |
 | retention-days  | False    | `'1'`     | pack   | Integer from 1 to 90, passed to the upload.                                                                                                                         |
 | fail-on-empty   | False    | `'true'`  | pack   | Strict boolean. Fail when nothing matched `paths`.                                                                                                                  |
@@ -219,9 +220,11 @@ extracts nothing until the download holds the tar, its manifest and
 nothing else, the manifest names `artifact-name` and this run's ID,
 hashes to `expected-digest` when given, and matches the tar.
 
-- **Destination.** `unpack` creates `destination` itself. An existing
-  `destination`, even an empty directory, or a symlink above it fails
-  the step.
+- **Destination.** By default `unpack` creates `destination` itself.
+  An existing `destination`, even an empty directory, or a symlink
+  above it fails the step. With `overlay: 'true'` it adds the files to
+  a `destination` that already exists instead; see
+  [Adding files to an existing directory](#adding-files-to-an-existing-directory).
 - **Pre-scan.** It checks every tar member before extracting any, and
   refuses the whole artefact on the first member that breaks a rule
   in [Trust model](#trust-model).
@@ -235,10 +238,98 @@ hashes to `expected-digest` when given, and matches the tar.
 - **Verification.** The extracted tree must match the manifest file
   for file.
 - **Cleanup.** On any failure after extraction began, the step removes
-  `destination` before failing, so a later step never reads a partial
-  tree.
+  what it wrote before failing, so a later step never reads a partial
+  tree: the whole `destination` by default, or with `overlay` the
+  files and directories it added and nothing else. With `overlay` it
+  first moves each entry it added into a private directory and checks
+  there that it remains the entry `unpack` created. It removes a match,
+  and a directory with `rmdir`, which fails on a non-empty one. An
+  entry another process put in its place, or wrote inside it, goes back
+  and survives, and the step reports what it left. Until the step
+  ends, `unpack` keeps alive each entry it added, a file or symlink by
+  a hard link in a private directory and a directory by an open
+  handle, so another process cannot remove one and create another with
+  the same identity, and so cleanup can still empty a directory whose
+  tar mode denies its owner read. It raises its soft open-file limit
+  to hold a handle for each new directory, and fails before adding
+  anything when the hard limit is too low. It empties its own private
+  directories, for staging, pins and rollback, through the handles it
+  holds on them, never by path. It removes an emptied one while its
+  name still names it, and otherwise leaves the name alone: a
+  directory another process put there keeps its contents, and the
+  step warns.
 
 Nothing in the artefact runs.
+
+### Adding files to an existing directory
+
+With `overlay: 'true'`, `unpack` adds the artefact's files to a
+`destination` that already exists, such as the repository checkout
+(`destination: "."`), so each file lands where a later step expects
+it: `app/target/app-1.0.jar` beside `app/Dockerfile`. The default,
+`'false'`, keeps the behaviour above.
+
+- **The destination must exist.** It must be a real directory inside
+  the workspace, with no symlink at or above it below the workspace.
+  A missing `destination` fails the step; `unpack` creates nothing
+  for it. `unpack` opens it once, walking down from the workspace
+  without following a symlink, and from then on reaches it through
+  that handle alone, cleanup included: a parent swapped for a symlink
+  afterwards cannot redirect a write.
+- **Nothing gets replaced.** The artefact adds files and never
+  changes one. A member that would land on a path that already
+  exists, whether a file, a directory or a symlink, fails the step
+  naming that path, as does a member below an existing file.
+- **No escape through the existing tree.** `unpack` never follows a
+  symlink already in `destination`: a member written through one fails
+  the step, even when it points back inside `destination`. Each
+  symlink member's target resolves against the tree as it will stand
+  afterwards, existing and new links together, and one that would
+  resolve outside `destination`, or through a chain too long to
+  resolve, fails the step. So does a chain through an existing link
+  with an absolute target once the path of `destination` no longer
+  reaches the directory `unpack` opened without a symlink on the way.
+- **No two spellings of one name.** A case-insensitive or normalising
+  filesystem, such as the macOS default, treats `Readme.md` and
+  `README.md`, or the composed and decomposed forms of `café`, as one
+  name; case-insensitive HFS+ also ignores code points such as U+200D
+  ZERO WIDTH JOINER. Two path segments are aliases when their Unicode
+  NFC forms match after case folding, ignoring Unicode's default
+  ignorable code points, but the strings differ. On every platform,
+  `unpack` fails the step, naming both spellings, when two member
+  paths or their prefixes are aliases, when a member path or prefix
+  aliases an entry already in its directory, or when a symlink target
+  reaches a member or an existing entry through an alias. It compares
+  the entries each directory holds as spelled, never looking a name
+  up, so the filesystem does not change the result. The cost: `unpack`
+  refuses an artefact holding names that differ by case, Unicode
+  normalisation or ignorable code points alone, within itself or
+  against `destination`, which is rare for build output.
+- **Existing directories keep their modes.** A directory member may
+  name an existing directory, whose mode `unpack` leaves alone;
+  directories it creates take their modes from the tar. `unpack` sets
+  a mode after the move on an entry it added and nothing else: one
+  that another process has replaced since fails the step, and keeps
+  its mode.
+- **All or nothing.** Every check runs against the current contents of
+  `destination` before `unpack` extracts any member. `unpack` then
+  extracts into a staging directory inside `destination`, verifies it
+  against the manifest as it does without `overlay`, and after that
+  moves each new top-level path in with the kernel's no-replace rename
+  (`renameat2` on Linux, `renameatx_np` on macOS), which fails rather
+  than replace a path that appeared since the checks. On any failure
+  it removes the staging directory and everything it added, leaving
+  `destination` as it found it. A platform or filesystem without that
+  rename fails the step before it adds anything.
+- **Every other rule still holds**: the manifest and digest checks,
+  `expected-digest`, `artifact-id`, the member refusals, the `data`
+  filter and the mode rules.
+
+`destination` reports the directory as before, and `file-count`
+counts the files added. Each call unpacks one artefact: to add
+more than one, call the action once for each. Two artefacts that carry the
+same path then collide, and the second call fails without writing
+anything.
 
 ## Manifest
 
@@ -322,13 +413,27 @@ The consumer may hold a credential, so a malicious artefact must not
 be able to write outside `destination`, run code, or pass itself off
 as another artefact.
 
+What `unpack` defends against: hostile artefact contents, including
+symlinks, name aliasing, collisions, modes and digests; and a
+concurrent process racing the unpack, through the handles it holds
+and the identity checks it makes. What it does not: a process that
+can already write as the runner user throughout the step, beyond
+these guarantees; and a filesystem whose name equivalence goes beyond
+Unicode NFC, case folding and the default ignorable code points.
+
 Before extracting any member, `unpack` fails the step on absolute
 paths, `..` segments and paths nested more than 256 levels deep. It
 refuses devices and FIFOs, and hard links to anything but an earlier
 regular member or with a mode other than that member's. It refuses
 symlinks whose target leaves the root or has a `..` after a named
 segment, members written through an earlier symlink, and members the
-manifest does not list. Setuid, setgid and sticky bits never survive
+manifest does not list. With `overlay`, it also refuses a member that
+would replace or reach through anything already in `destination`, and
+on every platform any name differing by case, Unicode normalisation or
+ignorable code points alone from another in the artefact or from an
+existing entry, as
+[Adding files to an existing directory](#adding-files-to-an-existing-directory)
+sets out. Setuid, setgid and sticky bits never survive
 extraction. An artefact from another run, or one that does not hash
 to `expected-digest`, never reaches extraction, and a failed
 extraction leaves no partial tree behind.
@@ -356,7 +461,8 @@ By design, the action does not offer:
 - **Docker image archives.** It packs a directory tree. Hand images
   over through a registry or a dedicated image workflow.
 - **Pattern fan-in.** Each call packs or unpacks one named artefact;
-  no glob merges two or more artefacts into one tree.
+  no glob merges two or more artefacts into one tree. Use `overlay`
+  once per artefact to add each one to the same directory.
 
 ## Testing
 
@@ -372,7 +478,9 @@ python3 -m unittest discover -s tests
 [`testing.yaml`](.github/workflows/testing.yaml) is the reference
 workflow: it runs the unit tests, then packs the checkout twice to
 check the outputs and that the digest is reproducible, and checks that
-an invalid `mode` fails validation.
+an invalid `mode` fails validation. It also unpacks with `overlay`
+into a directory holding a file of its own, and checks that a
+colliding file fails the step.
 
 [pre-commit.ci results page]: https://results.pre-commit.ci/latest/github/lfreleng-actions/build-artifact-action/main
 [pre-commit.ci status badge]: https://results.pre-commit.ci/badge/github/lfreleng-actions/build-artifact-action/main.svg

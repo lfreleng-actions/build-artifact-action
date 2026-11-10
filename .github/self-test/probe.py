@@ -75,6 +75,7 @@ def mode_env(
         return "pack.py", env
     env["INPUT_ARTIFACT_NAME"] = outputs["artifact_name"]
     env["INPUT_EXPECTED_DIGEST"] = outputs["expected_digest"]
+    env["INPUT_OVERLAY"] = outputs["overlay"]
     env["DOWNLOAD_DIR"] = base.get("DOWNLOAD_DIR", "")
     return "unpack.py", env
 

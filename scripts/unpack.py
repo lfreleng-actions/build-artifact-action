@@ -9,26 +9,28 @@ directory actions/download-artifact filled, checks it against its
 manifest (and 'expected-digest' when given), checks every tar member
 before extracting any, extracts into a newly created directory under
 the workspace with tarfile's 'data' filter, and verifies the tree
-against the manifest. Nothing it extracts is executed.
+against the manifest. With INPUT_OVERLAY 'true' it instead adds the
+files to an existing directory, replacing nothing (unpack_overlay.py;
+its rollback is in unpack_rollback.py), reaching that directory only
+through a descriptor held open (unpack_anchor.py).
+Nothing it extracts is executed.
 
 Inputs come from the environment: INPUT_ARTIFACT_NAME,
-INPUT_DESTINATION, INPUT_EXPECTED_DIGEST, DOWNLOAD_DIR and the runner's
-GITHUB_* variables. Each refusal prints one '::error::' line naming the
-rule and exits 1, removing anything this step created.
+INPUT_DESTINATION, INPUT_EXPECTED_DIGEST, INPUT_OVERLAY, DOWNLOAD_DIR
+and the runner's GITHUB_* variables. Each refusal prints one
+'::error::' line naming the rule and exits 1, removing anything this
+step created.
 """
 
 from __future__ import annotations
 
 import copy
 import os
-import posixpath
-import shutil
 import stat
 import sys
 import tarfile
 import warnings
 from collections.abc import Mapping
-from typing import cast
 
 # python3 -I leaves the action's own root off sys.path.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
@@ -41,27 +43,35 @@ from scripts.manifest import (
     verify_tar,
     verify_tree,
 )
-from scripts.manifest_schema import (
-    RegularEntry,
-    escape_annotation,
-    fail,
-    path_problem,
+from scripts.manifest_schema import escape_annotation, fail
+from scripts.unpack_anchor import Anchor
+from scripts.unpack_destination import (
+    create_destination,
+    plan_destination,
+    remove_created,
 )
-from scripts.unpack_links import check_link_target, restore_link_targets
+from scripts.unpack_links import restore_link_targets
+from scripts.unpack_members import match_manifest, scan_members
 from scripts.unpack_modes import (
     as_restored,
     drop_owner_read,
-    open_up,
     restore_dir_modes,
     restore_modes,
 )
-from scripts.validate import PATH_RULE, inside, path_grammar_ok, write_outputs
+from scripts.unpack_overlay import (
+    drop_staging,
+    make_staging,
+    overlay_enabled,
+    place,
+    plan_overlay,
+    scan_overlay,
+)
+from scripts.unpack_pins import PINS_PREFIX, Pins
+from scripts.unpack_rollback import Added, remove_added, staging_entry
+from scripts.validate import inside, write_outputs
 
 TAR_NAME = "build-artifact.tar"
 MANIFEST_NAME = "build-artifact.manifest.json"
-# Verifying and removing a tree recurse once per directory level, so a
-# bound far inside Python's recursion limit keeps both from failing.
-MAX_DEPTH = 256
 
 
 def require(env: Mapping[str, str], key: str) -> str:
@@ -70,81 +80,6 @@ def require(env: Mapping[str, str], key: str) -> str:
     if not value:
         fail(f"{key}: must be set")
     return value
-
-
-def plan_destination(workspace: str, value: str) -> tuple[str, list[str]]:
-    """Return the absolute destination and its missing ancestors, in order.
-
-    workspace is already canonical. Every existing component below it
-    must be a real directory, never a symlink, and the destination
-    itself must not exist: only a newly created root guarantees that no
-    pre-existing link beneath it can redirect a write.
-    """
-    if not path_grammar_ok(value):
-        fail(f"destination: {PATH_RULE}")
-    # The grammar admits '.' segments, which would otherwise survive into
-    # the paths created and checked below.
-    value = posixpath.normpath(value)
-    if value == ".":
-        fail("destination: must not exist; '.' is the workspace itself")
-    segments = value.split("/")
-    current = workspace
-    missing: list[str] = []
-    for depth, segment in enumerate(segments[:-1], start=1):
-        current = os.path.join(current, segment)
-        if missing:
-            missing.append(current)
-            continue
-        try:
-            mode = os.lstat(current).st_mode
-        except FileNotFoundError:
-            missing.append(current)
-            continue
-        except OSError as error:
-            fail(f"destination: cannot stat {current}: {error.strerror}")
-        ancestor = "/".join(segments[:depth])
-        if stat.S_ISLNK(mode):
-            fail(f"destination: ancestor {ancestor!r} is a symlink")
-        if not stat.S_ISDIR(mode):
-            fail(f"destination: ancestor {ancestor!r} is not a directory")
-    final = os.path.join(current, segments[-1])
-    if not missing and os.path.lexists(final):
-        fail(f"destination: {value!r} must not exist; unpack creates it")
-    return final, missing
-
-
-def create_destination(
-    workspace: str, final: str, missing: list[str], created: list[str]
-) -> None:
-    """Create each missing ancestor, then final, recording each in created."""
-    for path in [*missing, final]:
-        try:
-            os.mkdir(path)
-        except FileExistsError:
-            fail(f"destination: {path} must not exist; unpack creates it")
-        except OSError as error:
-            fail(f"destination: cannot create {path}: {error.strerror}")
-        created.append(path)
-    if os.path.realpath(final) != final or not inside(final, workspace):
-        fail(f"destination: {final} does not resolve inside the workspace")
-
-
-def remove_created(created: list[str]) -> list[str]:
-    """Remove what create_destination made: the tree, then empty parents.
-
-    Returns an error message for each path left behind.
-    """
-    problems: list[str] = []
-    for path in reversed(created):
-        try:
-            if path == created[-1]:
-                open_up(path)
-                shutil.rmtree(path)
-            else:
-                os.rmdir(path)
-        except OSError as error:
-            problems.append(f"cannot remove {path}: {error.strerror}")
-    return problems
 
 
 def check_download(directory: str) -> tuple[str, str]:
@@ -189,96 +124,6 @@ def verify_download(
     return manifest, digest
 
 
-def check_parents(name: str, kinds: Mapping[str, str]) -> None:
-    """Fail when a parent of name is an earlier symlink or file member."""
-    segments = name.split("/")
-    for depth in range(1, len(segments)):
-        parent = "/".join(segments[:depth])
-        kind = kinds.get(parent)
-        if kind == "symlink":
-            fail(f"tar member {name!r}: would be written through symlink {parent!r}")
-        if kind not in (None, "dir"):
-            fail(f"tar member {name!r}: lies below file member {parent!r}")
-
-
-def member_kind(
-    member: tarfile.TarInfo,
-    kinds: Mapping[str, str],
-    files: Mapping[str, tarfile.TarInfo],
-) -> str:
-    """Return the kind of member, failing on any type unpack refuses."""
-    name = member.name
-    if member.isdir():
-        return "dir"
-    if member.isreg():
-        return "file"
-    if member.islnk():
-        target = member.linkname
-        if kinds.get(target) != "file":
-            fail(f"tar member {name!r}: hard link {target!r} is not an earlier file")
-        # Both names share one inode, so they cannot keep different modes.
-        if member.mode & 0o7777 != files[target].mode & 0o7777:
-            fail(f"tar member {name!r}: hard link mode differs from {target!r}")
-        return "hardlink"
-    if member.issym():
-        check_link_target(name, member.linkname)
-        return "symlink"
-    if member.isdev():
-        fail(f"tar member {name!r}: device or FIFO member")
-    fail(f"tar member {name!r}: unsupported member type")
-
-
-def scan_members(members: list[tarfile.TarInfo]) -> dict[str, tarfile.TarInfo]:
-    """Fail on any unsafe member; return the non-directory members by name."""
-    kinds: dict[str, str] = {}
-    implied: set[str] = set()
-    files: dict[str, tarfile.TarInfo] = {}
-    for member in members:
-        name = member.name
-        problem = path_problem(name)
-        if problem is not None:
-            fail(f"tar member {name!r}: {problem}")
-        if name.count("/") >= MAX_DEPTH:
-            fail(f"tar member {name!r}: nested deeper than {MAX_DEPTH} levels")
-        if name in kinds:
-            fail(f"tar member {name!r}: appears more than once")
-        check_parents(name, kinds)
-        kind = member_kind(member, kinds, files)
-        if kind != "dir":
-            if name in implied:
-                fail(f"tar member {name!r}: replaces a directory")
-            files[name] = member
-        kinds[name] = kind
-        segments = name.split("/")
-        implied.update("/".join(segments[:depth]) for depth in range(1, len(segments)))
-    return files
-
-
-def match_manifest(manifest: Manifest, files: Mapping[str, tarfile.TarInfo]) -> None:
-    """Fail unless the tar's files and the manifest's entries are the same set."""
-    listed = {entry["path"]: entry for entry in manifest["files"]}
-    for name, member in files.items():
-        entry = listed.get(name)
-        if entry is None:
-            fail(f"tar member {name!r}: not listed in the manifest")
-        # mypy does not narrow a TypedDict union on 'in'; pyright does.
-        target = cast("Mapping[str, object]", entry).get("symlink")
-        if member.issym() != (target is not None) or (
-            member.issym() and member.linkname != target
-        ):
-            fail(f"tar member {name!r}: type or target does not match the manifest")
-        if member.issym():
-            continue
-        regular = cast("RegularEntry", entry)
-        if member.isreg() and member.size != regular["size"]:
-            fail(f"tar member {name!r}: size does not match the manifest")
-        if f"{member.mode & 0o7777:04o}" != regular["mode"]:
-            fail(f"tar member {name!r}: mode does not match the manifest")
-    missing = sorted(listed.keys() - files.keys())
-    if missing:
-        fail(f"{missing[0]}: listed in the manifest but missing from the tar")
-
-
 def has_data_filter() -> bool:
     """Return whether this interpreter's tarfile has extraction filters."""
     return hasattr(tarfile, "data_filter")
@@ -292,6 +137,8 @@ def data_rules(member: tarfile.TarInfo, root: str) -> tarfile.TarInfo:
     lose their high bits.
     """
     name = member.name
+    # With overlay, root is relative to the destination it runs in.
+    root = os.path.realpath(root)
     target = os.path.realpath(os.path.join(root, name))
     if target == root or not inside(target, root):
         fail(f"tar member {name!r}: resolves outside the destination")
@@ -351,22 +198,87 @@ def read_members(tar_path: str) -> list[tarfile.TarInfo]:
         fail(f"{TAR_NAME}: cannot read as an uncompressed tar: {error}")
 
 
-def unpack(env: Mapping[str, str], created: list[str]) -> dict[str, str]:
-    """Verify, extract and check the artefact; return the step outputs."""
+def fill(
+    tar_path: str,
+    root: str,
+    members: list[tarfile.TarInfo],
+    files: Mapping[str, tarfile.TarInfo],
+    manifest: Manifest,
+) -> int:
+    """Extract the tar into root and verify it; return the entries checked."""
+    extract(tar_path, root, members)
+    restore_link_targets(root, files)
+    restore_modes(root, files)
+    return verify_tree(as_restored(manifest), root)
+
+
+def overlay_into(
+    final: str,
+    tar_path: str,
+    members: list[tarfile.TarInfo],
+    files: Mapping[str, tarfile.TarInfo],
+    manifest: Manifest,
+    state: tuple[list[Added], Pins],
+) -> int:
+    """Add the tar's files to the working directory, the destination final.
+
+    state holds added, which records the staging directory and each
+    entry added, with its identity, and pins, which keeps each entry
+    added alive, so that identity stays its own. Returns the files added.
+    """
+    added, pins = state
+    plan = scan_overlay(final, members)
+    staging, staging_fd = make_staging(members)
+    try:
+        added.append(staging_entry(os.curdir, staging, staging_fd))
+        count = fill(tar_path, staging, members, files, manifest)
+        pins.open(*make_staging(members, PINS_PREFIX))
+        expected = place(staging, os.curdir, plan, added, pins)
+        drop_staging(staging, staging_fd, added)
+    finally:
+        os.close(staging_fd)
+    members = [member for member in members if member.name not in plan.existing]
+    drop_owner_read(os.curdir, files, expected)
+    restore_dir_modes(os.curdir, members, expected)
+    return count
+
+
+def unpack(
+    env: Mapping[str, str],
+    created: list[str],
+    state: tuple[list[Added], Pins],
+    anchor: Anchor,
+) -> dict[str, str]:
+    """Verify, extract and check the artefact; return the step outputs.
+
+    Without overlay, created records the directories made for the
+    destination. With overlay, anchor holds the destination open, and
+    state is as overlay_into fills it.
+    """
     workspace = os.path.realpath(require(env, "GITHUB_WORKSPACE"))
-    final, missing = plan_destination(workspace, require(env, "INPUT_DESTINATION"))
+    destination = require(env, "INPUT_DESTINATION")
+    overlay = overlay_enabled(env)
+    missing: list[str] = []
+    if overlay:
+        final, fd = plan_overlay(workspace, destination)
+        anchor.hold(fd)
+    else:
+        final, missing = plan_destination(workspace, destination)
     tar_path, manifest_path = check_download(require(env, "DOWNLOAD_DIR"))
+    # The overlay runs in the destination, where a relative path breaks.
+    tar_path = os.path.abspath(tar_path)
     manifest, digest = verify_download(env, tar_path, manifest_path)
     members = read_members(tar_path)
     files = scan_members(members)
     match_manifest(manifest, files)
-    create_destination(workspace, final, missing, created)
-    extract(tar_path, final, members)
-    restore_link_targets(final, files)
-    restore_modes(final, files)
-    count = verify_tree(as_restored(manifest), final)
-    drop_owner_read(final, files)
-    restore_dir_modes(final, members)
+    if overlay:
+        with anchor.entered():
+            count = overlay_into(final, tar_path, members, files, manifest, state)
+    else:
+        create_destination(workspace, final, missing, created)
+        count = fill(tar_path, final, members, files, manifest)
+        drop_owner_read(final, files)
+        restore_dir_modes(final, members)
     return {
         "destination": final,
         "artifact-name": manifest["artifact_name"],
@@ -389,26 +301,46 @@ def report(env: Mapping[str, str], output: str, outputs: Mapping[str, str]) -> N
     print(line)
 
 
+def clean_up(
+    created: list[str],
+    state: tuple[list[Added], Pins],
+    anchor: Anchor,
+) -> None:
+    """Remove what this step wrote, reporting anything left behind."""
+    added, pins = state
+    with anchor.entered():
+        problems = remove_added(added, pins.fds)
+    for problem in [*problems, *remove_created(created)]:
+        print(f"::error::{escape_annotation(problem)}")
+
+
 def run(env: Mapping[str, str]) -> int:
     """Run the unpack step; on any refusal remove what it created."""
     created: list[str] = []
+    state: tuple[list[Added], Pins] = ([], Pins())
+    anchor = Anchor()
+    code = 0
     try:
         output = require(env, "GITHUB_OUTPUT")
-        outputs = unpack(env, created)
+        outputs = unpack(env, created, state, anchor)
         try:
             report(env, output, outputs)
         except OSError as error:
             fail(f"cannot write the step outputs or summary: {error.strerror}")
     except ManifestError:
-        for problem in remove_created(created):
-            print(f"::error::{escape_annotation(problem)}")
-        return 1
+        clean_up(created, state, anchor)
+        code = 1
     except BaseException:
         # An unforeseen error must not leave a partial tree behind either.
-        for problem in remove_created(created):
-            print(f"::error::{escape_annotation(problem)}")
+        clean_up(created, state, anchor)
         raise
-    return 0
+    finally:
+        # Only now, after rollback, may an added entry's inode be reused.
+        for problem in state[1].release(anchor):
+            print(f"::error::{escape_annotation(problem)}")
+            code = 1
+        anchor.release()
+    return code
 
 
 def main() -> int:
