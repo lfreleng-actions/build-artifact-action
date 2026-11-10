@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import unicodedata
 import unittest
 from collections.abc import Callable
 from contextlib import AbstractContextManager, redirect_stdout
@@ -811,7 +812,6 @@ class OverlayTest(UnpackTestCase):
         self.assertIn(message, errors[0])
         self.assertEqual(listing(self.workspace), before)
 
-    @unittest.expectedFailure
     def test_adds_files(self) -> None:
         digest = self.packed_tree()
         self.existing_tree()
@@ -850,7 +850,6 @@ class OverlayTest(UnpackTestCase):
             ],
         )
 
-    @unittest.expectedFailure
     def test_adds_files_fallback(self) -> None:
         _ = self.packed_tree()
         self.existing_tree()
@@ -859,7 +858,6 @@ class OverlayTest(UnpackTestCase):
         self.assertTrue((self.target / "bin" / "run.sh").is_file())
         self.assertEqual((self.target / "Dockerfile").read_text(), "FROM scratch\n")
 
-    @unittest.expectedFailure
     def test_into_workspace(self) -> None:
         _ = self.packed_tree()
         self.destination = "."
@@ -869,7 +867,6 @@ class OverlayTest(UnpackTestCase):
         self.assertTrue((self.workspace / "bin" / "run.sh").is_file())
         self.assertEqual((self.workspace / "Dockerfile").read_text(), "FROM scratch\n")
 
-    @unittest.expectedFailure
     def test_existing_directory_keeps_mode(self) -> None:
         self.directory_download()
         (self.target / "a").mkdir(parents=True, mode=0o750)
@@ -881,28 +878,24 @@ class OverlayTest(UnpackTestCase):
             self.assertEqual(actual, mode, name)
         self.assertEqual((self.target / "a" / "b" / "f").read_bytes(), b"data\n")
 
-    @unittest.expectedFailure
     def test_onto_existing_file(self) -> None:
         _ = self.packed_tree()
         self.existing_tree()
         _ = (self.target / "shared.txt").write_text("mine\n")
         self.assert_overlay_refused("would replace existing file 'shared.txt'")
 
-    @unittest.expectedFailure
     def test_onto_existing_directory(self) -> None:
         _ = self.packed_tree()
         self.existing_tree()
         (self.target / "shared.txt").mkdir()
         self.assert_overlay_refused("would replace existing directory 'shared.txt'")
 
-    @unittest.expectedFailure
     def test_onto_existing_symlink(self) -> None:
         _ = self.packed_tree()
         self.existing_tree()
         (self.target / "shared.txt").symlink_to("Dockerfile")
         self.assert_overlay_refused("would replace existing symlink 'shared.txt'")
 
-    @unittest.expectedFailure
     def test_directory_member_onto_existing_file(self) -> None:
         _ = self.packed_tree()
         self.existing_tree()
@@ -915,14 +908,12 @@ class OverlayTest(UnpackTestCase):
         name = "bin/sub/run.sh"
         _ = self.download_of([regular(name, data)], [entry_for(name, data)])
 
-    @unittest.expectedFailure
     def test_below_existing_file(self) -> None:
         self.nested_download()
         self.target.mkdir()
         _ = (self.target / "bin").write_text("mine\n")
         self.assert_overlay_refused("lies below existing file 'bin'")
 
-    @unittest.expectedFailure
     def test_through_symlink_outside(self) -> None:
         self.nested_download()
         self.target.mkdir()
@@ -931,7 +922,6 @@ class OverlayTest(UnpackTestCase):
         self.assert_overlay_refused("would be written through symlink 'bin'")
         self.assertEqual(list(outside.iterdir()), [])
 
-    @unittest.expectedFailure
     def test_through_symlink_inside(self) -> None:
         self.nested_download()
         (self.target / "real").mkdir(parents=True)
@@ -939,7 +929,6 @@ class OverlayTest(UnpackTestCase):
         self.assert_overlay_refused("would be written through symlink 'bin'")
         self.assertEqual(list((self.target / "real").iterdir()), [])
 
-    @unittest.expectedFailure
     def test_symlink_target_escapes_through_existing_symlink(self) -> None:
         self.target.mkdir()
         outside = self.subdirectory("outside")
@@ -958,14 +947,12 @@ class OverlayTest(UnpackTestCase):
         ]
         _ = self.download_of(members, files)
 
-    @unittest.expectedFailure
     def test_symlink_chain_through_new_then_existing_link(self) -> None:
         self.target.mkdir()
         (self.target / "ext").symlink_to(self.subdirectory("outside"))
         self.link_download({"jump": ".", "link": "jump/ext/secret"})
         self.assert_overlay_refused("'link': symlink target resolves outside")
 
-    @unittest.expectedFailure
     def test_symlink_chain_through_existing_then_new_link(self) -> None:
         self.target.mkdir()
         (self.target / "ext").symlink_to(self.subdirectory("outside"))
@@ -973,7 +960,6 @@ class OverlayTest(UnpackTestCase):
         self.link_download({"jump": ".", "link": "hop/ext/secret"})
         self.assert_overlay_refused("'link': symlink target resolves outside")
 
-    @unittest.expectedFailure
     def test_symlink_chain_inside_both_trees(self) -> None:
         (self.target / "real").mkdir(parents=True)
         (self.target / "in").symlink_to("real")
@@ -982,7 +968,6 @@ class OverlayTest(UnpackTestCase):
         self.assertEqual(os.readlink(self.target / "link"), "jump/in")
         self.assertEqual((self.target / "link").resolve(), self.target / "real")
 
-    @unittest.expectedFailure
     def test_symlink_chain_through_absolute_link_inside(self) -> None:
         (self.target / "real").mkdir(parents=True)
         (self.target / "abs").symlink_to(self.target.resolve() / "real")
@@ -990,14 +975,89 @@ class OverlayTest(UnpackTestCase):
         self.assertEqual(self.run_overlay(), 0, self.stdout)
         self.assertEqual((self.target / "link").resolve(), self.target / "real")
 
-    @unittest.expectedFailure
     def test_symlink_loop(self) -> None:
         self.target.mkdir()
         (self.target / "loop").symlink_to("link")
         self.link_download({"link": "loop/x"})
         self.assert_overlay_refused("'link': symlink chain too long to resolve")
 
-    @unittest.expectedFailure
+    def files_download(self, names: list[str]) -> None:
+        """Download an artefact holding a small file at each of names."""
+        members = [regular(name, name.encode()) for name in names]
+        files = [entry_for(name, name.encode()) for name in names]
+        _ = self.download_of(members, files)
+
+    def test_symlink_chain_through_case_alias(self) -> None:
+        self.target.mkdir()
+        (self.target / "ext").symlink_to(self.subdirectory("outside"))
+        self.link_download({"Jump": ".", "link": "jump/ext/secret"})
+        self.assert_overlay_refused(
+            "'link': symlink target 'jump' and 'Jump' differ only by case"
+        )
+
+    def test_members_differing_by_case(self) -> None:
+        self.target.mkdir()
+        self.files_download(["a/Readme.md", "a/README.md"])
+        self.assert_overlay_refused(
+            "'a/README.md' and 'a/Readme.md' differ only by case or Unicode"
+        )
+
+    def test_member_prefixes_differing_by_case(self) -> None:
+        self.target.mkdir()
+        self.files_download(["Dir/a", "dir/b"])
+        self.assert_overlay_refused("'dir' and 'Dir' differ only by case")
+
+    def test_members_differing_by_normalisation(self) -> None:
+        self.target.mkdir()
+        composed = unicodedata.normalize("NFC", "café")
+        decomposed = unicodedata.normalize("NFD", "café")
+        self.files_download([composed, decomposed])
+        self.assert_overlay_refused(
+            f"{decomposed!r} and {composed!r} differ only by case or Unicode"
+        )
+
+    def test_member_beside_existing_case_alias(self) -> None:
+        self.target.mkdir()
+        _ = (self.target / "README.md").write_text("mine\n")
+        self.files_download(["Readme.md"])
+        self.assert_overlay_refused(
+            "'Readme.md' and existing 'README.md' differ only by case"
+        )
+
+    def test_member_below_existing_case_alias(self) -> None:
+        (self.target / "Bin").mkdir(parents=True)
+        self.files_download(["bin/run.sh"])
+        self.assert_overlay_refused("'bin' and existing 'Bin' differ only by case")
+
+    def test_symlink_target_case_alias_of_existing_directory(self) -> None:
+        (self.target / "Real").mkdir(parents=True)
+        self.link_download({"link": "real/x"})
+        self.assert_overlay_refused(
+            "'link': symlink target 'real' and existing 'Real' differ only by case"
+        )
+
+    def test_symlink_chain_through_ignorable_alias(self) -> None:
+        # Case-insensitive HFS+ ignores U+200D, so 'jump' would reach 'Jump\u200d'.
+        self.target.mkdir()
+        (self.target / "ext").symlink_to(self.subdirectory("outside"))
+        joined = "Jump\u200d"
+        self.link_download({joined: ".", "link": "jump/ext/secret"})
+        self.assert_overlay_refused(
+            f"'link': symlink target 'jump' and {joined!r} differ only by case"
+        )
+
+    def test_members_differing_by_ignorable_code_point(self) -> None:
+        self.target.mkdir()
+        joined = "a\u200db"
+        self.files_download(["ab", joined])
+        self.assert_overlay_refused(f"{joined!r} and 'ab' differ only by case")
+
+    def test_member_below_existing_ignorable_alias(self) -> None:
+        (self.target / "bin").mkdir(parents=True)
+        hyphenated = "b\u00adin"
+        self.files_download([f"{hyphenated}/run.sh"])
+        self.assert_overlay_refused(f"{hyphenated!r} and existing 'bin' differ")
+
     def test_failure_partway_writes_nothing(self) -> None:
         self.target.mkdir()
         _ = (self.target / "third").write_text("mine\n")
@@ -1008,7 +1068,6 @@ class OverlayTest(UnpackTestCase):
         self.assert_overlay_refused("would replace existing file 'third'")
         self.assertEqual(sorted(os.listdir(self.target)), ["third"])
 
-    @unittest.expectedFailure
     def test_failure_after_placing_removes_added(self) -> None:
         _ = self.packed_tree()
         self.existing_tree()
@@ -1016,7 +1075,6 @@ class OverlayTest(UnpackTestCase):
             "cannot write the step outputs", GITHUB_OUTPUT=str(self.base)
         )
 
-    @unittest.expectedFailure
     def test_failure_after_restricted_directories(self) -> None:
         self.directory_download()
         self.target.mkdir()
@@ -1024,7 +1082,6 @@ class OverlayTest(UnpackTestCase):
             "cannot write the step outputs", GITHUB_OUTPUT=str(self.base)
         )
 
-    @unittest.expectedFailure
     def test_verification_failure_removes_staging(self) -> None:
         _ = self.packed_tree()
         self.existing_tree()
@@ -1093,17 +1150,14 @@ class OverlayTest(UnpackTestCase):
         del after[planted_path]
         self.assertEqual(after, before)
 
-    @unittest.expectedFailure
     def test_file_appearing_before_added(self) -> None:
         _ = self.packed_tree()
         self.assert_race_refused("shared.txt")
 
-    @unittest.expectedFailure
     def test_symlink_appearing_before_added(self) -> None:
         _ = self.packed_tree()
         self.assert_race_refused("link")
 
-    @unittest.expectedFailure
     def test_directory_appearing_before_added(self) -> None:
         _ = self.packed_tree()
         self.assert_race_refused("org")
@@ -1123,7 +1177,6 @@ class OverlayTest(UnpackTestCase):
             )
         self.assertIn(message, self.stdout)
 
-    @unittest.expectedFailure
     def test_file_appearing_inside_new_directory(self) -> None:
         _ = self.packed_tree()
         self.target.mkdir()
@@ -1166,7 +1219,6 @@ class OverlayTest(UnpackTestCase):
         _ = after.pop(f"checkout/{name}")
         self.assertEqual(after, before)
 
-    @unittest.expectedFailure
     def test_file_replaced_after_added(self) -> None:
         def replace(path: Path) -> None:
             spare = path.with_name("spare")
@@ -1176,7 +1228,6 @@ class OverlayTest(UnpackTestCase):
         self.assert_replacement_kept("shared.txt", replace)
         self.assertEqual((self.target / "shared.txt").read_text(), "theirs\n")
 
-    @unittest.expectedFailure
     def test_directory_replaced_after_added(self) -> None:
         def replace(path: Path) -> None:
             # Keep the original, so its inode cannot be reused.
@@ -1189,15 +1240,58 @@ class OverlayTest(UnpackTestCase):
         )
         self.assertTrue((self.target / "empty").is_dir())
 
-    def assert_mode_kept(self, name: str, replace: Callable[[Path], None]) -> None:
-        """Assert the archive's mode never reaches what replaces name once added."""
+    def test_symlink_recreated_after_added(self) -> None:
+        # Nothing keeps the original here: its inode would be free for reuse.
+        original: list[int] = []
+
+        def replace(path: Path) -> None:
+            original.append(path.lstat().st_ino)
+            path.unlink()
+            path.symlink_to("theirs")
+
+        self.assert_replacement_kept("link", replace)
+        self.assertEqual(os.readlink(self.target / "link"), "theirs")
+        self.assertNotEqual((self.target / "link").lstat().st_ino, original[0])
+
+    def test_directory_recreated_after_added(self) -> None:
+        original: list[int] = []
+
+        def replace(path: Path) -> None:
+            original.append(path.lstat().st_ino)
+            path.rmdir()
+            path.mkdir()
+
+        self.assert_replacement_kept(
+            "empty", replace, "empty: replaced in the destination"
+        )
+        self.assertNotEqual((self.target / "empty").lstat().st_ino, original[0])
+
+    def test_too_many_directories_for_open_file_limit(self) -> None:
+        self.directory_download()
+        self.target.mkdir()
+        with (
+            mock.patch("resource.getrlimit", return_value=(64, 64)),
+            mock.patch("resource.setrlimit", side_effect=ValueError),
+        ):
+            self.assert_overlay_refused("directories needs")
+
+    def assert_mode_kept(
+        self, name: str, replace: Callable[[Path], None], keep: bool = True
+    ) -> None:
+        """Assert the archive's mode never reaches what replaces name once added.
+
+        With keep, the original moves aside, so its inode cannot be
+        reused; without, it is unlinked.
+        """
         self.target.mkdir()
         before = listing(self.workspace)
 
         def swap(path: str, _dir_fd: int) -> None:
             if path == name:
-                # Keep the original, so its inode cannot be reused.
-                _ = (self.target / name).rename(self.base / "original")
+                if keep:
+                    _ = (self.target / name).rename(self.base / "original")
+                else:
+                    (self.target / name).unlink()
                 replace(self.target / name)
 
         with self.hook_rename(after=swap):
@@ -1208,12 +1302,10 @@ class OverlayTest(UnpackTestCase):
         _ = after.pop(f"checkout/{name}")
         self.assertEqual(after, before)
 
-    @unittest.expectedFailure
     def test_directory_replaced_before_mode_set(self) -> None:
         self.directory_download()
         self.assert_mode_kept("d", lambda path: path.mkdir(mode=0o700))
 
-    @unittest.expectedFailure
     def test_file_replaced_before_owner_read_dropped(self) -> None:
         data = b"data\n"
         _ = self.download_of([regular("f", data, 0o200)], [entry_for("f", data, 0o200)])
@@ -1225,7 +1317,17 @@ class OverlayTest(UnpackTestCase):
         self.assert_mode_kept("f", replace)
         self.assertEqual((self.target / "f").read_text(), "theirs\n")
 
-    @unittest.expectedFailure
+    def test_file_recreated_before_owner_read_dropped(self) -> None:
+        data = b"data\n"
+        _ = self.download_of([regular("f", data, 0o200)], [entry_for("f", data, 0o200)])
+
+        def replace(path: Path) -> None:
+            _ = path.write_text("theirs\n")
+            path.chmod(0o700)
+
+        self.assert_mode_kept("f", replace, keep=False)
+        self.assertEqual((self.target / "f").read_text(), "theirs\n")
+
     def test_rollback_keeps_replaced_entry(self) -> None:
         from scripts.unpack_rollback import Added, remove_added
 
@@ -1239,7 +1341,6 @@ class OverlayTest(UnpackTestCase):
         self.assertEqual((self.target / "x").read_text(), "theirs\n")
         self.assertEqual(os.listdir(self.target), ["x"])
 
-    @unittest.expectedFailure
     def test_rollback_keeps_entry_replaced_before_removal(self) -> None:
         from scripts.unpack_rollback import Added, remove_added
 
@@ -1264,7 +1365,6 @@ class OverlayTest(UnpackTestCase):
         self.assertEqual((self.target / "x").read_text(), "theirs\n")
         self.assertEqual(os.listdir(self.target), ["x"])
 
-    @unittest.expectedFailure
     def test_failure_after_unreadable_directory_with_file(self) -> None:
         data = b"data\n"
         members = [special("c", tarfile.DIRTYPE), special("c/d", tarfile.DIRTYPE)]
@@ -1278,13 +1378,11 @@ class OverlayTest(UnpackTestCase):
         )
         self.assertEqual(os.listdir(self.target), [])
 
-    @unittest.expectedFailure
     def test_missing_destination(self) -> None:
         _ = self.packed_tree()
         self.assert_overlay_refused("must already exist")
         self.assertFalse(os.path.lexists(self.target))
 
-    @unittest.expectedFailure
     def test_symlinked_destination(self) -> None:
         _ = self.packed_tree()
         outside = self.subdirectory("outside")
@@ -1300,7 +1398,6 @@ class OverlayTest(UnpackTestCase):
         self.assertIn("must not exist", self.stdout)
         self.assertEqual(listing(self.workspace), before)
 
-    @unittest.expectedFailure
     def test_non_boolean(self) -> None:
         _ = self.packed_tree()
         self.existing_tree()
@@ -1326,7 +1423,6 @@ class OverlayTest(UnpackTestCase):
         _ = (self.workspace / "parent").rename(self.workspace / "moved")
         (self.workspace / "parent").symlink_to(outside)
 
-    @unittest.expectedFailure
     def test_parent_swapped_after_checks(self) -> None:
         _ = self.packed_tree()
         moved, outside, before = self.nested_destination()
@@ -1342,7 +1438,25 @@ class OverlayTest(UnpackTestCase):
         self.assertEqual(listing(outside), before)
         self.assertEqual((moved / "org" / "pkg" / "a.pom").read_text(), "<project/>\n")
 
-    @unittest.expectedFailure
+    def test_parent_swapped_with_absolute_link(self) -> None:
+        moved, outside, before = self.nested_destination()
+        checkout = self.workspace / "parent" / "checkout"
+        (checkout / "real").mkdir()
+        (checkout / "abs").symlink_to(checkout.resolve() / "real")
+        self.link_download({"link": "abs"})
+        from scripts.unpack_overlay import scan_overlay as real
+
+        def scan(*args: object) -> object:
+            self.swap_parent(outside)
+            return cast("Callable[..., object]", real)(*args)
+
+        with mock.patch("scripts.unpack.scan_overlay", scan):
+            code = self.run_overlay(INPUT_DESTINATION="parent/checkout")
+        self.assertEqual(code, 1, self.stdout)
+        self.assertIn("'link': symlink target resolves outside", self.stdout)
+        self.assertEqual(listing(outside), before)
+        self.assertEqual(sorted(os.listdir(moved)), ["abs", "real"])
+
     def test_parent_swapped_before_rollback(self) -> None:
         _ = self.packed_tree()
         moved, outside, before = self.nested_destination()
@@ -1362,7 +1476,6 @@ class OverlayTest(UnpackTestCase):
         self.assertEqual(listing(outside), before)
         self.assertEqual(os.listdir(moved), [])
 
-    @unittest.expectedFailure
     def test_many_read_only_directories(self) -> None:
         data = b"data\n"
         members: list[Member] = []
@@ -1384,6 +1497,126 @@ class OverlayTest(UnpackTestCase):
         self.assertEqual(code, 0, self.stdout)
         mode = stat.S_IMODE((self.target / "d0").lstat().st_mode)
         self.assertEqual(mode, 0o555)
+
+    def replace_private(self, prefix: str, inner: str = "theirs") -> tuple[Path, Path]:
+        """Move the private directory named prefix* aside; put a populated one there.
+
+        The replacement holds inner/theirs.txt. Returns the replacement
+        and the original, now in the test's base directory.
+        """
+        (name,) = [
+            entry for entry in os.listdir(self.target) if entry.startswith(prefix)
+        ]
+        aside = self.base / f"aside{name}"
+        _ = (self.target / name).rename(aside)
+        (self.target / name / inner).mkdir(parents=True)
+        _ = (self.target / name / inner / "theirs.txt").write_text("theirs\n")
+        return self.target / name, aside
+
+    def assert_replacement_survives(self, replacement: Path, inner: str) -> None:
+        """Assert cleanup kept replacement, with its contents, and warned."""
+        theirs = replacement / inner / "theirs.txt"
+        self.assertTrue(theirs.is_file(), self.stdout)
+        self.assertEqual(theirs.read_text(), "theirs\n")
+        self.assertEqual(os.listdir(replacement), [inner])
+        self.assertIn("another process replaced it", self.stdout)
+        self.assertTrue(
+            any(line.startswith("::warning::") for line in self.stdout.splitlines())
+        )
+
+    def private_replaced_after_placing(self, prefix: str) -> None:
+        """Replace prefix* once the last new path is added; assert the unpack holds.
+
+        The original, emptied through its descriptor, is all that goes:
+        the replacement keeps its contents and the files added stay.
+        """
+        _ = self.packed_tree()
+        self.existing_tree()
+        found: list[tuple[Path, Path]] = []
+
+        def swap(path: str, _dir_fd: int) -> None:
+            if path == "shared.txt":
+                found.append(self.replace_private(prefix))
+
+        with self.hook_rename(after=swap):
+            self.assertEqual(self.run_overlay(), 0, self.stdout)
+        replacement, aside = found[0]
+        self.assert_replacement_survives(replacement, "theirs")
+        self.assertEqual(os.listdir(aside), [])
+        self.assertTrue((self.target / "bin" / "run.sh").is_file())
+
+    def test_pin_directory_replaced_before_release(self) -> None:
+        from scripts.unpack_pins import PINS_PREFIX
+
+        self.private_replaced_after_placing(PINS_PREFIX)
+
+    def test_staging_replaced_before_removal(self) -> None:
+        from scripts.unpack_overlay import STAGING_PREFIX
+
+        self.private_replaced_after_placing(STAGING_PREFIX)
+
+    def test_clear_held_through_descriptor(self) -> None:
+        from scripts.unpack_rollback import remove_held
+
+        held = self.subdirectory("held")
+        outside = self.subdirectory("outside")
+        _ = (outside / "keep.txt").write_text("keep\n")
+        outside.chmod(0o750)
+        (held / "a" / "b").mkdir(parents=True)
+        _ = (held / "a" / "b" / "f").write_text("ours\n")
+        (held / "link").symlink_to(outside)
+        (held / "a" / "b").chmod(0o000)
+        (held / "a").chmod(0o500)
+        fd = os.open(held, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            parent = os.open(self.base, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                self.assertTrue(remove_held(parent, "held", fd))
+            finally:
+                os.close(parent)
+        finally:
+            os.close(fd)
+        self.assertFalse(os.path.lexists(held))
+        self.assertEqual(os.listdir(outside), ["keep.txt"])
+        self.assertEqual(stat.S_IMODE(outside.stat().st_mode), 0o750)
+
+    def test_quarantine_replaced_before_staging_removed(self) -> None:
+        from scripts.unpack_overlay import STAGING_PREFIX
+        from scripts.unpack_rollback import QUARANTINE_PREFIX
+
+        _ = self.packed_tree()
+        self.existing_tree()
+        before = listing(self.workspace)
+        original_extract = tarfile.TarFile.extractall
+        real_rename = os.rename
+        found: list[tuple[Path, Path, str]] = []
+
+        def plant(archive: tarfile.TarFile, path: str, **kwargs: object) -> None:
+            extract = cast("Callable[..., None]", original_extract)
+            extract(archive, path, **kwargs)
+            _ = (Path(path) / "empty" / "planted.txt").write_text("planted\n")
+
+        def rename(src: str, dst: str, **kwargs: int | None) -> None:
+            real_rename(src, dst, **kwargs)
+            if not found and str(src).startswith(STAGING_PREFIX):
+                # The replacement holds what the old path-based removal hit.
+                replacement, aside = self.replace_private(QUARANTINE_PREFIX, dst)
+                found.append((replacement, aside, dst))
+
+        with (
+            mock.patch.object(tarfile.TarFile, "extractall", plant),
+            mock.patch("os.rename", rename),
+        ):
+            self.assertEqual(self.run_overlay(), 1, self.stdout)
+        self.assertIn("present but not listed in the manifest", self.stdout)
+        replacement, aside, slot = found[0]
+        self.assert_replacement_survives(replacement, slot)
+        self.assertEqual(os.listdir(aside), [])
+        after = listing(self.workspace)
+        for path in list(after):
+            if path.startswith(f"checkout/{replacement.name}"):
+                del after[path]
+        self.assertEqual(after, before)
 
 
 if __name__ == "__main__":

@@ -9,12 +9,17 @@ directory actions/download-artifact filled, checks it against its
 manifest (and 'expected-digest' when given), checks every tar member
 before extracting any, extracts into a newly created directory under
 the workspace with tarfile's 'data' filter, and verifies the tree
-against the manifest. Nothing it extracts is executed.
+against the manifest. With INPUT_OVERLAY 'true' it instead adds the
+files to an existing directory, replacing nothing (unpack_overlay.py;
+its rollback is in unpack_rollback.py), reaching that directory only
+through a descriptor held open (unpack_anchor.py).
+Nothing it extracts is executed.
 
 Inputs come from the environment: INPUT_ARTIFACT_NAME,
-INPUT_DESTINATION, INPUT_EXPECTED_DIGEST, DOWNLOAD_DIR and the runner's
-GITHUB_* variables. Each refusal prints one '::error::' line naming the
-rule and exits 1, removing anything this step created.
+INPUT_DESTINATION, INPUT_EXPECTED_DIGEST, INPUT_OVERLAY, DOWNLOAD_DIR
+and the runner's GITHUB_* variables. Each refusal prints one
+'::error::' line naming the rule and exits 1, removing anything this
+step created.
 """
 
 from __future__ import annotations
@@ -39,6 +44,7 @@ from scripts.manifest import (
     verify_tree,
 )
 from scripts.manifest_schema import escape_annotation, fail
+from scripts.unpack_anchor import Anchor
 from scripts.unpack_destination import (
     create_destination,
     plan_destination,
@@ -52,6 +58,16 @@ from scripts.unpack_modes import (
     restore_dir_modes,
     restore_modes,
 )
+from scripts.unpack_overlay import (
+    drop_staging,
+    make_staging,
+    overlay_enabled,
+    place,
+    plan_overlay,
+    scan_overlay,
+)
+from scripts.unpack_pins import PINS_PREFIX, Pins
+from scripts.unpack_rollback import Added, remove_added, staging_entry
 from scripts.validate import inside, write_outputs
 
 TAR_NAME = "build-artifact.tar"
@@ -121,6 +137,8 @@ def data_rules(member: tarfile.TarInfo, root: str) -> tarfile.TarInfo:
     lose their high bits.
     """
     name = member.name
+    # With overlay, root is relative to the destination it runs in.
+    root = os.path.realpath(root)
     target = os.path.realpath(os.path.join(root, name))
     if target == root or not inside(target, root):
         fail(f"tar member {name!r}: resolves outside the destination")
@@ -180,22 +198,87 @@ def read_members(tar_path: str) -> list[tarfile.TarInfo]:
         fail(f"{TAR_NAME}: cannot read as an uncompressed tar: {error}")
 
 
-def unpack(env: Mapping[str, str], created: list[str]) -> dict[str, str]:
-    """Verify, extract and check the artefact; return the step outputs."""
+def fill(
+    tar_path: str,
+    root: str,
+    members: list[tarfile.TarInfo],
+    files: Mapping[str, tarfile.TarInfo],
+    manifest: Manifest,
+) -> int:
+    """Extract the tar into root and verify it; return the entries checked."""
+    extract(tar_path, root, members)
+    restore_link_targets(root, files)
+    restore_modes(root, files)
+    return verify_tree(as_restored(manifest), root)
+
+
+def overlay_into(
+    final: str,
+    tar_path: str,
+    members: list[tarfile.TarInfo],
+    files: Mapping[str, tarfile.TarInfo],
+    manifest: Manifest,
+    state: tuple[list[Added], Pins],
+) -> int:
+    """Add the tar's files to the working directory, the destination final.
+
+    state holds added, which records the staging directory and each
+    entry added, with its identity, and pins, which keeps each entry
+    added alive, so that identity stays its own. Returns the files added.
+    """
+    added, pins = state
+    plan = scan_overlay(final, members)
+    staging, staging_fd = make_staging(members)
+    try:
+        added.append(staging_entry(os.curdir, staging, staging_fd))
+        count = fill(tar_path, staging, members, files, manifest)
+        pins.open(*make_staging(members, PINS_PREFIX))
+        expected = place(staging, os.curdir, plan, added, pins)
+        drop_staging(staging, staging_fd, added)
+    finally:
+        os.close(staging_fd)
+    members = [member for member in members if member.name not in plan.existing]
+    drop_owner_read(os.curdir, files, expected)
+    restore_dir_modes(os.curdir, members, expected)
+    return count
+
+
+def unpack(
+    env: Mapping[str, str],
+    created: list[str],
+    state: tuple[list[Added], Pins],
+    anchor: Anchor,
+) -> dict[str, str]:
+    """Verify, extract and check the artefact; return the step outputs.
+
+    Without overlay, created records the directories made for the
+    destination. With overlay, anchor holds the destination open, and
+    state is as overlay_into fills it.
+    """
     workspace = os.path.realpath(require(env, "GITHUB_WORKSPACE"))
-    final, missing = plan_destination(workspace, require(env, "INPUT_DESTINATION"))
+    destination = require(env, "INPUT_DESTINATION")
+    overlay = overlay_enabled(env)
+    missing: list[str] = []
+    if overlay:
+        final, fd = plan_overlay(workspace, destination)
+        anchor.hold(fd)
+    else:
+        final, missing = plan_destination(workspace, destination)
     tar_path, manifest_path = check_download(require(env, "DOWNLOAD_DIR"))
+    # The overlay runs in the destination, where a relative path breaks.
+    tar_path = os.path.abspath(tar_path)
     manifest, digest = verify_download(env, tar_path, manifest_path)
     members = read_members(tar_path)
     files = scan_members(members)
     match_manifest(manifest, files)
-    create_destination(workspace, final, missing, created)
-    extract(tar_path, final, members)
-    restore_link_targets(final, files)
-    restore_modes(final, files)
-    count = verify_tree(as_restored(manifest), final)
-    drop_owner_read(final, files)
-    restore_dir_modes(final, members)
+    if overlay:
+        with anchor.entered():
+            count = overlay_into(final, tar_path, members, files, manifest, state)
+    else:
+        create_destination(workspace, final, missing, created)
+        count = fill(tar_path, final, members, files, manifest)
+        drop_owner_read(final, files)
+        restore_dir_modes(final, members)
     return {
         "destination": final,
         "artifact-name": manifest["artifact_name"],
@@ -218,26 +301,46 @@ def report(env: Mapping[str, str], output: str, outputs: Mapping[str, str]) -> N
     print(line)
 
 
+def clean_up(
+    created: list[str],
+    state: tuple[list[Added], Pins],
+    anchor: Anchor,
+) -> None:
+    """Remove what this step wrote, reporting anything left behind."""
+    added, pins = state
+    with anchor.entered():
+        problems = remove_added(added, pins.fds)
+    for problem in [*problems, *remove_created(created)]:
+        print(f"::error::{escape_annotation(problem)}")
+
+
 def run(env: Mapping[str, str]) -> int:
     """Run the unpack step; on any refusal remove what it created."""
     created: list[str] = []
+    state: tuple[list[Added], Pins] = ([], Pins())
+    anchor = Anchor()
+    code = 0
     try:
         output = require(env, "GITHUB_OUTPUT")
-        outputs = unpack(env, created)
+        outputs = unpack(env, created, state, anchor)
         try:
             report(env, output, outputs)
         except OSError as error:
             fail(f"cannot write the step outputs or summary: {error.strerror}")
     except ManifestError:
-        for problem in remove_created(created):
-            print(f"::error::{escape_annotation(problem)}")
-        return 1
+        clean_up(created, state, anchor)
+        code = 1
     except BaseException:
         # An unforeseen error must not leave a partial tree behind either.
-        for problem in remove_created(created):
-            print(f"::error::{escape_annotation(problem)}")
+        clean_up(created, state, anchor)
         raise
-    return 0
+    finally:
+        # Only now, after rollback, may an added entry's inode be reused.
+        for problem in state[1].release(anchor):
+            print(f"::error::{escape_annotation(problem)}")
+            code = 1
+        anchor.release()
+    return code
 
 
 def main() -> int:

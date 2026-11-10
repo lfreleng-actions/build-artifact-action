@@ -42,6 +42,7 @@ INPUTS: dict[str, tuple[str, str, str | None]] = {
     "retention-days": ("INPUT_RETENTION_DAYS", "1", "pack"),
     "fail-on-empty": ("INPUT_FAIL_ON_EMPTY", "true", "pack"),
     "overwrite": ("INPUT_OVERWRITE", "false", "pack"),
+    "overlay": ("INPUT_OVERLAY", "false", "unpack"),
 }
 
 PATH_RULE = (
@@ -194,6 +195,7 @@ def validate(env: Mapping[str, str]) -> dict[str, str]:
         "retention_days": "",
         "fail_on_empty": "",
         "overwrite": "",
+        "overlay": "",
     }
 
     if mode == "pack":
@@ -222,6 +224,9 @@ def validate(env: Mapping[str, str]) -> dict[str, str]:
                 "expected-digest: must be a SHA-256 of 64 lower-case hex digits"
             )
         out["expected_digest"] = digest
+        if values["overlay"] not in BOOLEANS:
+            errors.append("overlay: must be exactly 'true' or 'false'")
+        out["overlay"] = values["overlay"]
 
     if errors:
         raise ValidationError(errors)

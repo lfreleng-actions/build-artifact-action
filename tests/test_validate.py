@@ -103,7 +103,6 @@ class AcceptedTest(ValidateTestCase):
                 self.assertEqual(out["fail_on_empty"], value)
                 self.assertEqual(out["overwrite"], value)
 
-    @unittest.expectedFailure
     def test_unpack(self) -> None:
         out = validate(
             self.env(
@@ -119,7 +118,6 @@ class AcceptedTest(ValidateTestCase):
         self.assertEqual(out["expected_digest"], DIGEST)
         self.assertEqual(out["overlay"], "false")
 
-    @unittest.expectedFailure
     def test_unpack_overlay(self) -> None:
         for value in ("true", "false"):
             with self.subTest(value=value):
@@ -237,7 +235,6 @@ class RejectedTest(ValidateTestCase):
         (self.workspace / "build" / "up").symlink_to(self.base)
         self.assert_rejected(self.env("pack", path="build", paths="up"), "paths")
 
-    @unittest.expectedFailure
     def test_booleans(self) -> None:
         for value in ("", "True", "TRUE", "yes", "1", "false "):
             with self.subTest(value=value):
@@ -265,7 +262,6 @@ class RejectedTest(ValidateTestCase):
                     "expected-digest",
                 )
 
-    @unittest.expectedFailure
     def test_unpack_inputs_with_pack(self) -> None:
         cases = {
             "destination": {"destination": "out"},

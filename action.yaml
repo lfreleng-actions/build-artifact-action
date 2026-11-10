@@ -39,6 +39,12 @@ inputs:
       [unpack] Directory to extract into; must resolve inside
       GITHUB_WORKSPACE. Required in unpack mode
     required: false
+  overlay:
+    description: >-
+      [unpack] Add the files to an existing 'destination', replacing
+      nothing, instead of creating it (true/false)
+    required: false
+    default: "false"
   expected-digest:
     description: >-
       [unpack] SHA-256 (64 lower-case hex) of the manifest; extract only
@@ -95,6 +101,7 @@ runs:
         INPUT_RETENTION_DAYS: ${{ inputs.retention-days }}
         INPUT_FAIL_ON_EMPTY: ${{ inputs.fail-on-empty }}
         INPUT_OVERWRITE: ${{ inputs.overwrite }}
+        INPUT_OVERLAY: ${{ inputs.overlay }}
       run: |
         # Validate inputs
         python3 -I "${GITHUB_ACTION_PATH}/scripts/validate.py"
@@ -165,6 +172,7 @@ runs:
         INPUT_ARTIFACT_NAME: ${{ steps.validate.outputs.artifact_name }}
         INPUT_DESTINATION: ${{ inputs.destination }}
         INPUT_EXPECTED_DIGEST: ${{ steps.validate.outputs.expected_digest }}
+        INPUT_OVERLAY: ${{ steps.validate.outputs.overlay }}
         DOWNLOAD_DIR: ${{ steps.scratch.outputs.path }}
       run: |
         # Unpack

@@ -10,7 +10,8 @@ action. A producer job packs with `mode: pack` and exports
 `artifact-id` and `digest`; the consumer names the producer in
 `needs:` and unpacks with `mode: unpack`, passing the producer's
 `artifact-name`, `artifact-id` and `digest` (as `expected-digest`) and
-a `destination` that does not yet exist. See the
+a `destination` that does not yet exist, or an existing one with
+`overlay: 'true'`. See the
 [README](../README.md#usage) for the full contract.
 
 ## security-workflows: sonatype-lifecycle.yaml
@@ -74,11 +75,11 @@ Tracking: [java-workflows#132](https://github.com/lfreleng-actions/java-workflow
 
 ## docker-workflows
 
-- [ ] In each of the three lanes that download `build_artifacts`,
-      replace the download with `mode: unpack` into a staging
-      directory, such as `destination: "build-artifacts"`.
-- [ ] Keep the existing step that copies the staged files into the
-      Docker build context, reading from the `destination` output.
+- [ ] In each of the three lanes that take `build_artifacts`,
+      replace the steps that check and place the build artefacts
+      with `mode: unpack` and `overlay: 'true'` into the checkout,
+      such as `destination: "."`, one call per artefact, so each
+      file lands beside its module's `Dockerfile`.
 - [ ] Pass the producer's `artifact-id` and `digest` when the caller
       supplies them.
 
