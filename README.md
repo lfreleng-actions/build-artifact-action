@@ -243,21 +243,22 @@ hashes to `expected-digest` when given, and matches the tar.
   files and directories it added and nothing else. With `overlay` it
   first moves each entry it added into a private directory and checks
   there that it remains the entry `unpack` created. It removes a match,
-  and a directory with `rmdir`, which fails on a non-empty one. An
-  entry another process put in its place, or wrote inside it, goes back
-  and survives, and the step reports what it left. Until the step
-  ends, `unpack` keeps alive each entry it added, a file or symlink by
-  a hard link in a private directory and a directory by an open
-  handle, so another process cannot remove one and create another with
-  the same identity, and so cleanup can still empty a directory whose
-  tar mode denies its owner read. It raises its soft open-file limit
-  to hold a handle for each new directory, and fails before adding
-  anything when the hard limit is too low. It empties its own private
+  and a directory with `rmdir`, which fails on a non-empty one. It
+  removes nothing it can no longer identify as its own: anything else
+  goes back to its old path and stays, and the step reports what it
+  left. Until the step ends, `unpack` keeps alive each entry it added, a
+  file or symlink by a hard link in a private directory and a directory
+  by an open handle, so that no other entry can take an added entry's
+  identity, and so cleanup can still empty a directory whose tar mode
+  denies its owner read. It raises its soft open-file limit to hold a
+  handle for each new directory, and fails before adding anything when
+  the hard limit is too low for those handles. Emptying a deep staging
+  tree can still run out of descriptors later; see
+  [Known limitations](#known-limitations). It empties its own private
   directories, for staging, pins and rollback, through the handles it
-  holds on them, never by path. It removes an emptied one while its
-  name still names it, and otherwise leaves the name alone: a
-  directory another process put there keeps its contents, and the
-  step warns.
+  holds on them, never by path. It removes an emptied one while its name
+  still names it, and otherwise leaves whatever the name now names, with
+  a warning.
 
 Nothing in the artefact runs.
 
@@ -274,8 +275,7 @@ it: `app/target/app-1.0.jar` beside `app/Dockerfile`. The default,
   A missing `destination` fails the step; `unpack` creates nothing
   for it. `unpack` opens it once, walking down from the workspace
   without following a symlink, and from then on reaches it through
-  that handle alone, cleanup included: a parent swapped for a symlink
-  afterwards cannot redirect a write.
+  that handle alone, cleanup included, rather than by its path.
 - **Nothing gets replaced.** The artefact adds files and never
   changes one. A member that would land on a path that already
   exists, whether a file, a directory or a symlink, fails the step
@@ -307,20 +307,22 @@ it: `app/target/app-1.0.jar` beside `app/Dockerfile`. The default,
   against `destination`, which is rare for build output.
 - **Existing directories keep their modes.** A directory member may
   name an existing directory, whose mode `unpack` leaves alone;
-  directories it creates take their modes from the tar. `unpack` sets
-  a mode after the move on an entry it added and nothing else: one
-  that another process has replaced since fails the step, and keeps
-  its mode.
+  directories it creates take their modes from the tar. After the
+  move, `unpack` sets a mode on an entry it can still identify as one
+  it added and on nothing else; finding anything else at that path
+  fails the step and leaves that entry's mode alone.
 - **All or nothing.** Every check runs against the current contents of
   `destination` before `unpack` extracts any member. `unpack` then
   extracts into a staging directory inside `destination`, verifies it
   against the manifest as it does without `overlay`, and after that
   moves each new top-level path in with the kernel's no-replace rename
-  (`renameat2` on Linux, `renameatx_np` on macOS), which fails rather
-  than replace a path that appeared since the checks. On any failure
-  it removes the staging directory and everything it added, leaving
-  `destination` as it found it. A platform or filesystem without that
-  rename fails the step before it adds anything.
+  (`renameat2` on Linux, `renameatx_np` on macOS), which fails the
+  step if the path exists by then rather than replace it. On any
+  failure it removes the staging directory and everything it added,
+  leaving `destination` as it found it, except where
+  [Known limitations](#known-limitations) says otherwise. A platform
+  or filesystem without that rename fails the step before it adds
+  anything.
 - **Every other rule still holds**: the manifest and digest checks,
   `expected-digest`, `artifact-id`, the member refusals, the `data`
   filter and the mode rules.
@@ -413,13 +415,23 @@ The consumer may hold a credential, so a malicious artefact must not
 be able to write outside `destination`, run code, or pass itself off
 as another artefact.
 
-What `unpack` defends against: hostile artefact contents, including
-symlinks, name aliasing, collisions, modes and digests; and a
-concurrent process racing the unpack, through the handles it holds
-and the identity checks it makes. What it does not: a process that
-can already write as the runner user throughout the step, beyond
-these guarantees; and a filesystem whose name equivalence goes beyond
-Unicode NFC, case folding and the default ignorable code points.
+What `unpack` defends against: the artefact's contents, whatever the
+producer job wrote into it, including symlinks, name aliasing,
+collisions, modes and digests.
+
+What is out of scope: any process running as the runner user while
+the step runs, including one racing the unpack. Such a process can
+already rewrite the action, its interpreter or `destination`, so no
+check inside the action can hold against it. The job split this
+action exists for is the defence: the consumer job runs nothing
+from the artefact or the project. Also out of scope: a filesystem
+whose name equivalence goes beyond Unicode NFC, case folding and the
+default ignorable code points.
+
+The handles `unpack` holds, its identity checks, its pins, the rollback
+quarantine and the no-replace renames are hardening, not a guarantee:
+they narrow the window in which a concurrent change can affect the
+step, and promise nothing more.
 
 Before extracting any member, `unpack` fails the step on absolute
 paths, `..` segments and paths nested more than 256 levels deep. It
@@ -436,7 +448,10 @@ existing entry, as
 sets out. Setuid, setgid and sticky bits never survive
 extraction. An artefact from another run, or one that does not hash
 to `expected-digest`, never reaches extraction, and a failed
-extraction leaves no partial tree behind.
+extraction leaves no partial tree behind. With `overlay`, the
+descriptor limit under [Known limitations](#known-limitations) can
+leave the staging directory behind, holding directories but no files,
+and the step reports it.
 
 On the producer side, `pack` guards against leaking the checkout's
 credential: it never packs `.git`, and refuses to run while
@@ -463,6 +478,34 @@ By design, the action does not offer:
 - **Pattern fan-in.** Each call packs or unpacks one named artefact;
   no glob merges two or more artefacts into one tree. Use `overlay`
   once per artefact to add each one to the same directory.
+
+### Known limitations
+
+- **`unpack` reaches staging by name.** With `overlay`, `unpack`
+  holds the staging directory open, but still extracts into it,
+  verifies it and moves entries out of it by name: `overlay_into()` in
+  `scripts/unpack.py` passes the staging name to `fill()` and
+  `place()`. A process that replaced that name during the step could
+  redirect the extraction or the move. Such a process is out of scope
+  under the model above.
+  ([review thread](https://github.com/lfreleng-actions/build-artifact-action/pull/22#discussion_r4526203363))
+- **Emptying staging can run out of descriptors.** `Pins.reserve()` in
+  `scripts/unpack_pins.py` raises the soft open-file limit to hold one
+  descriptor for each directory the overlay adds, plus a fixed
+  `SPARE_DESCRIPTORS` of 64. After the move, `unpack` empties the
+  staging directory with an `os.fwalk`, which holds one more
+  descriptor for each level of the staging tree. That tree still holds
+  every directory member that already exists in `destination`, so an
+  overlay that adds a large number of directories, together with a
+  deep chain of such existing directory members, can hit `EMFILE`
+  after its files are in place. The step then fails with a Python
+  traceback for the `OSError`. Rollback removes the files and
+  directories the overlay moved into `destination`, but emptying the
+  staging directory hits the same limit, so `unpack` leaves the
+  `.build-artifact-staging-*` directory in `destination`, holding
+  directories but no files, and reports it in an `::error::` line
+  carrying the `EMFILE` message.
+  ([review thread](https://github.com/lfreleng-actions/build-artifact-action/pull/22#discussion_r4526203467))
 
 ## Testing
 
