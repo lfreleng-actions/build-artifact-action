@@ -87,10 +87,22 @@ outputs:
 runs:
   using: "composite"
   steps:
+    # Run the scripts under an interpreter this action chooses, not
+    # whichever python3 the caller's PATH resolves first.
+    # update-environment: false leaves the caller's PATH unchanged.
+    - name: "Set up Python"
+      id: python
+      # yamllint disable-line rule:line-length
+      uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      with:
+        python-version: "3.13"
+        update-environment: false
+
     - name: "Validate inputs"
       id: validate
       shell: bash
       env:
+        PYTHON: ${{ steps.python.outputs.python-path }}
         INPUT_MODE: ${{ inputs.mode }}
         INPUT_ARTIFACT_NAME: ${{ inputs.artifact-name }}
         INPUT_ARTIFACT_ID: ${{ inputs.artifact-id }}
@@ -104,20 +116,21 @@ runs:
         INPUT_OVERLAY: ${{ inputs.overlay }}
       run: |
         # Validate inputs
-        python3 -I "${GITHUB_ACTION_PATH}/scripts/validate.py"
+        "$PYTHON" -I "${GITHUB_ACTION_PATH}/scripts/validate.py"
 
     - name: "Pack"
       id: pack
       if: inputs.mode == 'pack'
       shell: bash
       env:
+        PYTHON: ${{ steps.python.outputs.python-path }}
         PACK_ROOT: ${{ steps.validate.outputs.root }}
         PACK_PATHS: ${{ steps.validate.outputs.paths }}
         PACK_ARTIFACT_NAME: ${{ steps.validate.outputs.artifact_name }}
         PACK_FAIL_ON_EMPTY: ${{ steps.validate.outputs.fail_on_empty }}
       run: |
         # Pack
-        python3 -I -B "${GITHUB_ACTION_PATH}/scripts/pack.py"
+        "$PYTHON" -I -B "${GITHUB_ACTION_PATH}/scripts/pack.py"
 
     # The tar is the unit of transfer: zipping it again buys little and
     # costs time on hundreds of MB, so compression is off.
@@ -169,6 +182,7 @@ runs:
       if: inputs.mode == 'unpack'
       shell: bash
       env:
+        PYTHON: ${{ steps.python.outputs.python-path }}
         INPUT_ARTIFACT_NAME: ${{ steps.validate.outputs.artifact_name }}
         INPUT_DESTINATION: ${{ inputs.destination }}
         INPUT_EXPECTED_DIGEST: ${{ steps.validate.outputs.expected_digest }}
@@ -176,4 +190,4 @@ runs:
         DOWNLOAD_DIR: ${{ steps.scratch.outputs.path }}
       run: |
         # Unpack
-        python3 -I "${GITHUB_ACTION_PATH}/scripts/unpack.py"
+        "$PYTHON" -I -B "${GITHUB_ACTION_PATH}/scripts/unpack.py"

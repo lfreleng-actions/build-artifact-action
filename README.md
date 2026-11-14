@@ -428,6 +428,12 @@ from the artefact or the project. Also out of scope: a filesystem
 whose name equivalence goes beyond Unicode NFC, case folding and the
 default ignorable code points.
 
+The action does not run its scripts under whichever `python3` the
+caller's `PATH` resolves first. A commit-pinned `actions/setup-python`
+step provides Python 3.13 and the scripts run under its `python-path`
+output with `-I`. The step sets `update-environment: false`, so the
+caller's `PATH` and Python environment stay as they were.
+
 The handles `unpack` holds, its identity checks, its pins, the rollback
 quarantine and the no-replace renames are hardening, not a guarantee:
 they narrow the window in which a concurrent change can affect the
