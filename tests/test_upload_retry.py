@@ -215,7 +215,6 @@ class UploadRetryTest(unittest.TestCase):
         self.assertEqual(steps["upload"].maps["with"]["compression-level"], "0")
         self.assertIn("pack.py", steps["pack"].keys["run"])
 
-    @unittest.expectedFailure
     def test_attempts_match_the_first(self) -> None:
         """Every attempt uploads the same files the same way."""
         found = attempts()
@@ -225,7 +224,6 @@ class UploadRetryTest(unittest.TestCase):
                 self.assertEqual(step.keys["uses"], found[0].keys["uses"])
                 self.assertEqual(step.maps["with"], found[0].maps["with"])
 
-    @unittest.expectedFailure
     def test_later_attempts_need_failure_and_overwrite(self) -> None:
         """Each later attempt runs only after a failure, with overwrite."""
         found = attempts()
@@ -245,7 +243,6 @@ class UploadRetryTest(unittest.TestCase):
                 self.assertFalse(run.failed)
                 self.assertEqual(run.slept, 0)
 
-    @unittest.expectedFailure
     def test_waits_lie_between_attempts(self) -> None:
         """A failed attempt is followed by a wait, then the next attempt."""
         for failures in range(1, ATTEMPTS):
@@ -260,7 +257,6 @@ class UploadRetryTest(unittest.TestCase):
                         self.assertTrue(run.ran[i - 1].startswith("upload"))
                         self.assertTrue(run.ran[i + 1].startswith("upload"))
 
-    @unittest.expectedFailure
     def test_last_failure_fails_the_action(self) -> None:
         """When every attempt fails, the action fails and says so."""
         run = simulate("true", ["failure"] * ATTEMPTS)
@@ -283,7 +279,6 @@ class UploadRetryTest(unittest.TestCase):
         self.assertTrue(run.failed)
         self.assertEqual(run.slept, 0)
 
-    @unittest.expectedFailure
     def test_artifact_id_draws_on_every_attempt(self) -> None:
         """The artifact-id output reads the ID from every attempt."""
         value = artifact_id_value()
