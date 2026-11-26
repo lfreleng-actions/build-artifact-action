@@ -4,8 +4,10 @@
 
 # Action self-test: packs a fixture tree, unpacks it by artefact ID, by
 # name and with overlay in other jobs, and proves the refusal cases fail
-# for the reason they must. The unit tests under tests/ cover the scripts
-# offline; this covers the real artefact round trip between jobs.
+# for the reason they must. It also packs and unpacks in one job, back
+# to back, and unpacks an artefact nothing uploaded. The unit tests
+# under tests/ cover the scripts offline; this covers the real artefact
+# round trip, between jobs and within one.
 name: "Test GitHub Action 🧪"
 
 # yamllint disable-line rule:truthy
@@ -604,6 +606,157 @@ jobs:
           fi
           echo "Refused safely ✅"
 
+  ### Pack and unpack in one job, back to back ###
+  # A download straight after its upload is where the artefact
+  # service's listing lag shows: this is the shape a caller is exposed
+  # in, and the case the download retry covers.
+  round-trip:
+    name: "Round trip by ${{ matrix.by }}"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        by: ["name", "id"]
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@65ff87957e1cac2de3203a85dbb07c31810321cb  # v0.16.4
+        with:
+          config: '@56d70f0eae78f334a598d1ffe071d4b821517b22'  # v0.17.1
+
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c  # v2.23.0
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: "Checkout repository"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Build fixture tree"
+        shell: bash
+        run: |
+          # Build fixture tree
+          mkdir -p fixture/nested
+          printf '#!/bin/sh\necho "round trip"\n' > fixture/run.sh
+          chmod 0755 fixture/run.sh
+          printf 'plain\n' > fixture/plain.txt
+          chmod 0644 fixture/plain.txt
+          printf 'nested\n' > fixture/nested/file.txt
+          ln -s ../plain.txt fixture/nested/plain-link
+
+      - name: "Record expected tree"
+        shell: bash
+        run: |
+          # Record expected tree
+          mkdir "$RUNNER_TEMP/expected"
+          bash .github/self-test/tree.sh fixture \
+            > "$RUNNER_TEMP/expected/expected.txt"
+
+      # overwrite lets a re-run of this job reuse the name.
+      - name: "Running local action: ${{ github.repository }} [pack]"
+        uses: $/
+        id: pack
+        with:
+          mode: "pack"
+          artifact-name: "round-trip-${{ matrix.by }}-${{ github.run_id }}"
+          path: "fixture"
+          overwrite: "true"
+
+      - name: "Running local action: ${{ github.repository }} [unpack]"
+        uses: $/
+        id: unpack
+        with:
+          mode: "unpack"
+          # yamllint disable-line rule:line-length
+          artifact-id: ${{ matrix.by == 'id' && steps.pack.outputs.artifact-id || '' }}
+          artifact-name: ${{ steps.pack.outputs.artifact-name }}
+          expected-digest: ${{ steps.pack.outputs.digest }}
+          destination: "restored"
+
+      - name: "Error if restored tree is wrong"
+        shell: bash
+        env:
+          DESTINATION: ${{ steps.unpack.outputs.destination }}
+          DIGEST: ${{ steps.unpack.outputs.digest }}
+          FILE_COUNT: ${{ steps.unpack.outputs.file-count }}
+          EXPECTED_DIGEST: ${{ steps.pack.outputs.digest }}
+          EXPECTED_COUNT: ${{ steps.pack.outputs.file-count }}
+        run: |
+          # Error if restored tree is wrong
+          bash .github/self-test/check-restored.sh
+
+  ### Unpack an artefact nothing uploaded ###
+  # The download fails on every attempt, so the action fails only after
+  # the waits between them, 30 seconds in all, and creates nothing.
+  missing:
+    name: "Refuse missing artefact"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@65ff87957e1cac2de3203a85dbb07c31810321cb  # v0.16.4
+        with:
+          config: '@56d70f0eae78f334a598d1ffe071d4b821517b22'  # v0.17.1
+
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c  # v2.23.0
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: "Checkout repository"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Record start time"
+        shell: bash
+        run: |
+          # Record start time
+          date +%s > "$RUNNER_TEMP/start"
+
+      # yamllint disable-line rule:line-length
+      - name: "Running local action: ${{ github.repository }} [Override Failure]"
+        uses: $/
+        id: attempt
+        continue-on-error: true
+        with:
+          mode: "unpack"
+          artifact-name: "missing-${{ github.run_id }}"
+          destination: "missing"
+
+      - name: "Error if step above did NOT fail after every attempt"
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.attempt.outcome }}
+        run: |
+          # Error if step above did NOT fail after every attempt
+          if [ "$OUTCOME" != "failure" ]; then
+            echo "Error: unpacking a missing artefact did NOT fail ($OUTCOME) ❌"
+            exit 1
+          fi
+          elapsed=$(( $(date +%s) - $(cat "$RUNNER_TEMP/start") ))
+          if [ "$elapsed" -lt 30 ]; then
+            echo "Error: failed after ${elapsed}s, before the last attempt ❌"
+            exit 1
+          fi
+          if [ -e missing ] || [ -L missing ]; then
+            echo "Error: destination 'missing' was created ❌"
+            exit 1
+          fi
+          echo "Failed after every attempt, in ${elapsed}s ✅"
+
   ### Unit tests, as run here and as the action runs its scripts ###
   unit:
     name: "Unit tests"
@@ -659,6 +812,8 @@ jobs:
       - consume-by-name
       - consume-overlay
       - refuse
+      - round-trip
+      - missing
       - unit
     runs-on: ubuntu-latest
     permissions:

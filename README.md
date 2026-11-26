@@ -563,4 +563,8 @@ workflow: it runs the unit tests, then packs the checkout twice to
 check the outputs and that the digest is reproducible, and checks that
 an invalid `mode` fails validation. It also unpacks with `overlay`
 into a directory holding a file of its own, and checks that a
-colliding file fails the step.
+colliding file fails the step. One job packs and unpacks back to
+back, by name and by ID, where a download meets the artefact
+service's listing lag and the [download retry](#unpack) covers it.
+Another unpacks an artefact nothing uploaded, and checks that the
+action fails after the last attempt and creates no `destination`.
