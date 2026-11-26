@@ -120,7 +120,7 @@ and no token, and refuses a manifest that records another run.
 | expected-digest | False    | `''`      | unpack | SHA-256 (64 lower-case hex) of the manifest. When set, the action extracts nothing unless the downloaded manifest hashes to it.                                     |
 | retention-days  | False    | `'1'`     | pack   | Integer from 1 to 90, passed to the upload.                                                                                                                         |
 | fail-on-empty   | False    | `'true'`  | pack   | Strict boolean. Fail when nothing matched `paths`.                                                                                                                  |
-| overwrite       | False    | `'false'` | pack   | Strict boolean. Replace an artefact of the same name in this run.                                                                                                   |
+| overwrite       | False    | `'false'` | pack   | Strict boolean. Replace an artefact of the same name in this run, retrying a failed upload; see [Pack](#pack).                                                      |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -204,6 +204,20 @@ of transfer, and zipping it again costs time on large trees.
   hundreds of MB are acceptable; the runner's disk, which holds the
   tree and the tar at once, is the practical limit. Pack the output
   a consumer needs, not the whole workspace.
+- **Overwrite.** With `overwrite: true`, `actions/upload-artifact`
+  looks the old artefact up by name and deletes it before uploading.
+  GitHub's artefact service can fail to list an artefact for a moment
+  after its upload, so an overwrite straight after an upload of the
+  same name can miss it and fail with `(409) Conflict`. `pack` then
+  retries the upload, up to five attempts in all, waiting 2, 4, 8 and
+  16 seconds between them; each attempt deletes whatever an earlier
+  one left under the name. An upload that succeeds at once waits for
+  nothing. The action sees that an attempt failed but not why, and
+  retries any failure. The `artifact-id` output carries the ID from
+  the attempt that succeeded. When all five fail, the action fails
+  with an error naming the artefact and the attempts made. With
+  `overwrite: false` a 409 means another artefact holds the name, and
+  the first failed upload fails the action.
 - **Retention.** `retention-days` defaults to `1`. The artefact is a
   hand-off between jobs of one run, not a release asset; raise it
   when a consumer job may run, or be re-run, later than a day after
@@ -524,6 +538,9 @@ python3 -m unittest discover -s tests
 
 `tests/test_readme.py` fails when the [Inputs](#inputs) or
 [Outputs](#outputs) table drifts from `action.yaml`.
+`tests/test_upload_retry.py` reads the upload steps out of
+`action.yaml` and walks them for a run of failed uploads, checking
+when [`overwrite`](#pack) retries and when it fails at once.
 [`testing.yaml`](.github/workflows/testing.yaml) is the reference
 workflow: it runs the unit tests, then packs the checkout twice to
 check the outputs and that the digest is reproducible, and checks that

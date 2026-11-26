@@ -69,7 +69,13 @@ inputs:
 outputs:
   artifact-id:
     description: "[pack] The ID actions/upload-artifact returned"
-    value: ${{ steps.upload.outputs.artifact-id }}
+    # The latest attempt that ran is the one that succeeded.
+    value: >-
+      ${{ steps.upload-5.outputs.artifact-id
+      || steps.upload-4.outputs.artifact-id
+      || steps.upload-3.outputs.artifact-id
+      || steps.upload-2.outputs.artifact-id
+      || steps.upload.outputs.artifact-id }}
   artifact-name:
     description: "The artefact name used or verified"
     value: ${{ steps.validate.outputs.artifact_name }}
@@ -134,9 +140,19 @@ runs:
 
     # The tar is the unit of transfer: zipping it again buys little and
     # costs time on hundreds of MB, so compression is off.
+    #
+    # With overwrite, upload-artifact looks the old artefact up by name
+    # and deletes it before creating the new one. GitHub's artefact
+    # service can fail to list an artefact for a moment after its
+    # upload, so the lookup misses it and the create returns 409. Each
+    # attempt deletes whatever an earlier one left under the name, so
+    # with overwrite a failed upload is retried, up to five attempts,
+    # after waits of 2, 4, 8 and 16 seconds. Without overwrite a 409 is
+    # a real name collision, and the first failure fails the action.
     - name: "Upload artefact"
       id: upload
       if: inputs.mode == 'pack'
+      continue-on-error: ${{ steps.validate.outputs.overwrite == 'true' }}
       # yamllint disable-line rule:line-length
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
@@ -148,6 +164,127 @@ runs:
         overwrite: ${{ steps.validate.outputs.overwrite }}
         if-no-files-found: error
         compression-level: 0
+
+    - name: "Wait before upload attempt 2"
+      if: >-
+        inputs.mode == 'pack' && steps.validate.outputs.overwrite == 'true'
+        && steps.upload.outcome == 'failure'
+      shell: bash
+      run: |
+        # Wait before upload attempt 2
+        sleep 2
+
+    - name: "Upload artefact (attempt 2)"
+      id: upload-2
+      if: >-
+        inputs.mode == 'pack' && steps.validate.outputs.overwrite == 'true'
+        && steps.upload.outcome == 'failure'
+      continue-on-error: true
+      # yamllint disable-line rule:line-length
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: ${{ steps.validate.outputs.artifact_name }}
+        path: |
+          ${{ steps.pack.outputs.tar }}
+          ${{ steps.pack.outputs.manifest }}
+        retention-days: ${{ steps.validate.outputs.retention_days }}
+        overwrite: ${{ steps.validate.outputs.overwrite }}
+        if-no-files-found: error
+        compression-level: 0
+
+    - name: "Wait before upload attempt 3"
+      if: >-
+        inputs.mode == 'pack' && steps.validate.outputs.overwrite == 'true'
+        && steps.upload-2.outcome == 'failure'
+      shell: bash
+      run: |
+        # Wait before upload attempt 3
+        sleep 4
+
+    - name: "Upload artefact (attempt 3)"
+      id: upload-3
+      if: >-
+        inputs.mode == 'pack' && steps.validate.outputs.overwrite == 'true'
+        && steps.upload-2.outcome == 'failure'
+      continue-on-error: true
+      # yamllint disable-line rule:line-length
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: ${{ steps.validate.outputs.artifact_name }}
+        path: |
+          ${{ steps.pack.outputs.tar }}
+          ${{ steps.pack.outputs.manifest }}
+        retention-days: ${{ steps.validate.outputs.retention_days }}
+        overwrite: ${{ steps.validate.outputs.overwrite }}
+        if-no-files-found: error
+        compression-level: 0
+
+    - name: "Wait before upload attempt 4"
+      if: >-
+        inputs.mode == 'pack' && steps.validate.outputs.overwrite == 'true'
+        && steps.upload-3.outcome == 'failure'
+      shell: bash
+      run: |
+        # Wait before upload attempt 4
+        sleep 8
+
+    - name: "Upload artefact (attempt 4)"
+      id: upload-4
+      if: >-
+        inputs.mode == 'pack' && steps.validate.outputs.overwrite == 'true'
+        && steps.upload-3.outcome == 'failure'
+      continue-on-error: true
+      # yamllint disable-line rule:line-length
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: ${{ steps.validate.outputs.artifact_name }}
+        path: |
+          ${{ steps.pack.outputs.tar }}
+          ${{ steps.pack.outputs.manifest }}
+        retention-days: ${{ steps.validate.outputs.retention_days }}
+        overwrite: ${{ steps.validate.outputs.overwrite }}
+        if-no-files-found: error
+        compression-level: 0
+
+    - name: "Wait before upload attempt 5"
+      if: >-
+        inputs.mode == 'pack' && steps.validate.outputs.overwrite == 'true'
+        && steps.upload-4.outcome == 'failure'
+      shell: bash
+      run: |
+        # Wait before upload attempt 5
+        sleep 16
+
+    - name: "Upload artefact (attempt 5)"
+      id: upload-5
+      if: >-
+        inputs.mode == 'pack' && steps.validate.outputs.overwrite == 'true'
+        && steps.upload-4.outcome == 'failure'
+      continue-on-error: true
+      # yamllint disable-line rule:line-length
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: ${{ steps.validate.outputs.artifact_name }}
+        path: |
+          ${{ steps.pack.outputs.tar }}
+          ${{ steps.pack.outputs.manifest }}
+        retention-days: ${{ steps.validate.outputs.retention_days }}
+        overwrite: ${{ steps.validate.outputs.overwrite }}
+        if-no-files-found: error
+        compression-level: 0
+
+    - name: "Report failed upload"
+      if: >-
+        inputs.mode == 'pack' && steps.validate.outputs.overwrite == 'true'
+        && steps.upload-5.outcome == 'failure'
+      shell: bash
+      env:
+        ARTIFACT_NAME: ${{ steps.validate.outputs.artifact_name }}
+      run: |
+        # Report failed upload
+        message="Upload of artefact '${ARTIFACT_NAME}' failed after 5 attempts"
+        echo "::error::${message}"
+        exit 1
 
     # The artefact is untrusted: download it into a fresh scratch
     # directory under RUNNER_TEMP, never into the workspace.
