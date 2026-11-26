@@ -234,6 +234,19 @@ extracts nothing until the download holds the tar, its manifest and
 nothing else, the manifest names `artifact-name` and this run's ID,
 hashes to `expected-digest` when given, and matches the tar.
 
+- **Download.** `unpack` downloads by name when `artifact-id` is
+  empty, and otherwise by ID. GitHub's artefact service can fail
+  to list an artefact for a moment after its upload, so a download
+  straight after the `pack`, as in a job that does both, can find
+  nothing, by name or by ID. `unpack` then retries the download, up
+  to five attempts in all, waiting 2, 4, 8 and 16 seconds between
+  them, and empties the scratch directory before each retry, so it
+  never reads files a failed attempt left. A download that succeeds at
+  once waits for nothing. The action sees that an attempt failed but
+  not why, and retries any failure, so an artefact that does not exist
+  takes thirty seconds longer to fail. When all five fail, the action
+  fails with an error naming the artefact, its ID when given, and the
+  attempts made, and extracts nothing.
 - **Destination.** By default `unpack` creates `destination` itself.
   An existing `destination`, even an empty directory, or a symlink
   above it fails the step. With `overlay: 'true'` it adds the files to
@@ -541,9 +554,17 @@ python3 -m unittest discover -s tests
 `tests/test_upload_retry.py` reads the upload steps out of
 `action.yaml` and walks them for a run of failed uploads, checking
 when [`overwrite`](#pack) retries and when it fails at once.
+`tests/test_download_retry.py` walks the download steps the same way,
+by name and by ID, checking that [`unpack`](#unpack) retries a failed
+download, that the two paths stay apart, and that `unpack` reads the
+files of the last attempt and no other.
 [`testing.yaml`](.github/workflows/testing.yaml) is the reference
 workflow: it runs the unit tests, then packs the checkout twice to
 check the outputs and that the digest is reproducible, and checks that
 an invalid `mode` fails validation. It also unpacks with `overlay`
 into a directory holding a file of its own, and checks that a
-colliding file fails the step.
+colliding file fails the step. One job packs and unpacks back to
+back, by name and by ID, where a download meets the artefact
+service's listing lag and the [download retry](#unpack) covers it.
+Another unpacks an artefact nothing uploaded, and checks that the
+action fails after the last attempt and creates no `destination`.
