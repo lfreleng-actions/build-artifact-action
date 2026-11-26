@@ -117,7 +117,6 @@ class Scratch:
 class DownloadRetryTest(unittest.TestCase):
     """A failed download is retried, by name and by ID alike."""
 
-    @unittest.expectedFailure
     def test_attempts_match_the_first(self) -> None:
         """Every attempt downloads the same artefact into the scratch."""
         for by, (key, value, _, _) in PATHS.items():
@@ -130,7 +129,6 @@ class DownloadRetryTest(unittest.TestCase):
                     self.assertEqual(step.maps["with"], found[0].maps["with"])
                     self.assertEqual(step.keys.get("continue-on-error"), "true")
 
-    @unittest.expectedFailure
     def test_later_attempts_need_failure(self) -> None:
         """Each later attempt runs only after a failure, on its own path."""
         for by, (_, _, _, clause) in PATHS.items():
@@ -152,7 +150,6 @@ class DownloadRetryTest(unittest.TestCase):
                 self.assertFalse(run.failed)
                 self.assertEqual(run.slept, 0)
 
-    @unittest.expectedFailure
     def test_waits_lie_between_attempts(self) -> None:
         """A failed attempt is followed by a wait, then the next attempt."""
         for by in PATHS:
@@ -172,7 +169,6 @@ class DownloadRetryTest(unittest.TestCase):
                             self.assertIn(middle[i - 1], ran)
                             self.assertIn(middle[i + 1], ran)
 
-    @unittest.expectedFailure
     def test_last_failure_fails_the_action(self) -> None:
         """When every attempt fails, the action fails before unpack."""
         steps = {step.label: step for step in download_section()}
@@ -208,7 +204,6 @@ class DownloadRetryTest(unittest.TestCase):
                     run = simulate(by, outcomes[:ATTEMPTS])
                     self.assertFalse(excluded & set(run.ran))
 
-    @unittest.expectedFailure
     def test_unpack_reads_one_attempt(self) -> None:
         """Unpack finds only the files of the attempt that succeeded."""
         for step in download_section():

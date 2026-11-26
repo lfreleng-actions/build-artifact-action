@@ -297,22 +297,257 @@ runs:
         scratch="$(mktemp -d "${RUNNER_TEMP}/build-artifact.XXXXXXXX")"
         echo "path=${scratch}" >> "$GITHUB_OUTPUT"
 
-    # Same run only: no run-id and no github-token.
+    # Same run only: no run-id and no github-token. By name when
+    # artifact-id is empty, by ID when it is set.
+    #
+    # GitHub's artefact service can fail to list an artefact for a
+    # moment after its upload, so a download straight after one can find
+    # nothing, by name or by ID. A failed download is retried, up to five
+    # attempts, after waits of 2, 4, 8 and 16 seconds. The action sees
+    # only a step's outcome, so it retries any failure. Each wait first
+    # empties the scratch directory, so Unpack reads the files of one
+    # attempt only. When the fifth attempt fails, the report step fails
+    # the action and Unpack does not run.
     - name: "Download artefact by name"
+      id: download-by-name
       if: inputs.mode == 'unpack' && steps.validate.outputs.artifact_id == ''
+      continue-on-error: true
       # yamllint disable-line rule:line-length
       uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
         name: ${{ steps.validate.outputs.artifact_name }}
         path: ${{ steps.scratch.outputs.path }}
 
+    - name: "Wait before download attempt 2 by name"
+      if: >-
+        inputs.mode == 'unpack' && steps.validate.outputs.artifact_id == ''
+        && steps.download-by-name.outcome == 'failure'
+      shell: bash
+      env:
+        DOWNLOAD_DIR: ${{ steps.scratch.outputs.path }}
+      run: |
+        # Wait before download attempt 2 by name
+        find "$DOWNLOAD_DIR" -mindepth 1 -delete
+        sleep 2
+
+    - name: "Download artefact by name (attempt 2)"
+      id: download-by-name-2
+      if: >-
+        inputs.mode == 'unpack' && steps.validate.outputs.artifact_id == ''
+        && steps.download-by-name.outcome == 'failure'
+      continue-on-error: true
+      # yamllint disable-line rule:line-length
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        name: ${{ steps.validate.outputs.artifact_name }}
+        path: ${{ steps.scratch.outputs.path }}
+
+    - name: "Wait before download attempt 3 by name"
+      if: >-
+        inputs.mode == 'unpack' && steps.validate.outputs.artifact_id == ''
+        && steps.download-by-name-2.outcome == 'failure'
+      shell: bash
+      env:
+        DOWNLOAD_DIR: ${{ steps.scratch.outputs.path }}
+      run: |
+        # Wait before download attempt 3 by name
+        find "$DOWNLOAD_DIR" -mindepth 1 -delete
+        sleep 4
+
+    - name: "Download artefact by name (attempt 3)"
+      id: download-by-name-3
+      if: >-
+        inputs.mode == 'unpack' && steps.validate.outputs.artifact_id == ''
+        && steps.download-by-name-2.outcome == 'failure'
+      continue-on-error: true
+      # yamllint disable-line rule:line-length
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        name: ${{ steps.validate.outputs.artifact_name }}
+        path: ${{ steps.scratch.outputs.path }}
+
+    - name: "Wait before download attempt 4 by name"
+      if: >-
+        inputs.mode == 'unpack' && steps.validate.outputs.artifact_id == ''
+        && steps.download-by-name-3.outcome == 'failure'
+      shell: bash
+      env:
+        DOWNLOAD_DIR: ${{ steps.scratch.outputs.path }}
+      run: |
+        # Wait before download attempt 4 by name
+        find "$DOWNLOAD_DIR" -mindepth 1 -delete
+        sleep 8
+
+    - name: "Download artefact by name (attempt 4)"
+      id: download-by-name-4
+      if: >-
+        inputs.mode == 'unpack' && steps.validate.outputs.artifact_id == ''
+        && steps.download-by-name-3.outcome == 'failure'
+      continue-on-error: true
+      # yamllint disable-line rule:line-length
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        name: ${{ steps.validate.outputs.artifact_name }}
+        path: ${{ steps.scratch.outputs.path }}
+
+    - name: "Wait before download attempt 5 by name"
+      if: >-
+        inputs.mode == 'unpack' && steps.validate.outputs.artifact_id == ''
+        && steps.download-by-name-4.outcome == 'failure'
+      shell: bash
+      env:
+        DOWNLOAD_DIR: ${{ steps.scratch.outputs.path }}
+      run: |
+        # Wait before download attempt 5 by name
+        find "$DOWNLOAD_DIR" -mindepth 1 -delete
+        sleep 16
+
+    - name: "Download artefact by name (attempt 5)"
+      id: download-by-name-5
+      if: >-
+        inputs.mode == 'unpack' && steps.validate.outputs.artifact_id == ''
+        && steps.download-by-name-4.outcome == 'failure'
+      continue-on-error: true
+      # yamllint disable-line rule:line-length
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        name: ${{ steps.validate.outputs.artifact_name }}
+        path: ${{ steps.scratch.outputs.path }}
+
+    - name: "Report failed download by name"
+      if: >-
+        inputs.mode == 'unpack' && steps.validate.outputs.artifact_id == ''
+        && steps.download-by-name-5.outcome == 'failure'
+      shell: bash
+      env:
+        ARTIFACT_NAME: ${{ steps.validate.outputs.artifact_name }}
+      run: |
+        # Report failed download by name
+        artefact="'${ARTIFACT_NAME}'"
+        message="Download of artefact ${artefact} failed after 5 attempts"
+        echo "::error::${message}"
+        exit 1
+
     - name: "Download artefact by ID"
+      id: download-by-id
       if: inputs.mode == 'unpack' && steps.validate.outputs.artifact_id != ''
+      continue-on-error: true
       # yamllint disable-line rule:line-length
       uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
         artifact-ids: ${{ steps.validate.outputs.artifact_id }}
         path: ${{ steps.scratch.outputs.path }}
+
+    - name: "Wait before download attempt 2 by ID"
+      if: >-
+        inputs.mode == 'unpack' && steps.validate.outputs.artifact_id != ''
+        && steps.download-by-id.outcome == 'failure'
+      shell: bash
+      env:
+        DOWNLOAD_DIR: ${{ steps.scratch.outputs.path }}
+      run: |
+        # Wait before download attempt 2 by ID
+        find "$DOWNLOAD_DIR" -mindepth 1 -delete
+        sleep 2
+
+    - name: "Download artefact by ID (attempt 2)"
+      id: download-by-id-2
+      if: >-
+        inputs.mode == 'unpack' && steps.validate.outputs.artifact_id != ''
+        && steps.download-by-id.outcome == 'failure'
+      continue-on-error: true
+      # yamllint disable-line rule:line-length
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        artifact-ids: ${{ steps.validate.outputs.artifact_id }}
+        path: ${{ steps.scratch.outputs.path }}
+
+    - name: "Wait before download attempt 3 by ID"
+      if: >-
+        inputs.mode == 'unpack' && steps.validate.outputs.artifact_id != ''
+        && steps.download-by-id-2.outcome == 'failure'
+      shell: bash
+      env:
+        DOWNLOAD_DIR: ${{ steps.scratch.outputs.path }}
+      run: |
+        # Wait before download attempt 3 by ID
+        find "$DOWNLOAD_DIR" -mindepth 1 -delete
+        sleep 4
+
+    - name: "Download artefact by ID (attempt 3)"
+      id: download-by-id-3
+      if: >-
+        inputs.mode == 'unpack' && steps.validate.outputs.artifact_id != ''
+        && steps.download-by-id-2.outcome == 'failure'
+      continue-on-error: true
+      # yamllint disable-line rule:line-length
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        artifact-ids: ${{ steps.validate.outputs.artifact_id }}
+        path: ${{ steps.scratch.outputs.path }}
+
+    - name: "Wait before download attempt 4 by ID"
+      if: >-
+        inputs.mode == 'unpack' && steps.validate.outputs.artifact_id != ''
+        && steps.download-by-id-3.outcome == 'failure'
+      shell: bash
+      env:
+        DOWNLOAD_DIR: ${{ steps.scratch.outputs.path }}
+      run: |
+        # Wait before download attempt 4 by ID
+        find "$DOWNLOAD_DIR" -mindepth 1 -delete
+        sleep 8
+
+    - name: "Download artefact by ID (attempt 4)"
+      id: download-by-id-4
+      if: >-
+        inputs.mode == 'unpack' && steps.validate.outputs.artifact_id != ''
+        && steps.download-by-id-3.outcome == 'failure'
+      continue-on-error: true
+      # yamllint disable-line rule:line-length
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        artifact-ids: ${{ steps.validate.outputs.artifact_id }}
+        path: ${{ steps.scratch.outputs.path }}
+
+    - name: "Wait before download attempt 5 by ID"
+      if: >-
+        inputs.mode == 'unpack' && steps.validate.outputs.artifact_id != ''
+        && steps.download-by-id-4.outcome == 'failure'
+      shell: bash
+      env:
+        DOWNLOAD_DIR: ${{ steps.scratch.outputs.path }}
+      run: |
+        # Wait before download attempt 5 by ID
+        find "$DOWNLOAD_DIR" -mindepth 1 -delete
+        sleep 16
+
+    - name: "Download artefact by ID (attempt 5)"
+      id: download-by-id-5
+      if: >-
+        inputs.mode == 'unpack' && steps.validate.outputs.artifact_id != ''
+        && steps.download-by-id-4.outcome == 'failure'
+      continue-on-error: true
+      # yamllint disable-line rule:line-length
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        artifact-ids: ${{ steps.validate.outputs.artifact_id }}
+        path: ${{ steps.scratch.outputs.path }}
+
+    - name: "Report failed download by ID"
+      if: >-
+        inputs.mode == 'unpack' && steps.validate.outputs.artifact_id != ''
+        && steps.download-by-id-5.outcome == 'failure'
+      shell: bash
+      env:
+        ARTIFACT_NAME: ${{ steps.validate.outputs.artifact_name }}
+        ARTIFACT_ID: ${{ steps.validate.outputs.artifact_id }}
+      run: |
+        # Report failed download by ID
+        artefact="'${ARTIFACT_NAME}' (ID ${ARTIFACT_ID})"
+        message="Download of artefact ${artefact} failed after 5 attempts"
+        echo "::error::${message}"
+        exit 1
 
     - name: "Unpack"
       id: unpack
